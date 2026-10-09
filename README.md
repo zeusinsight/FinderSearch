@@ -91,6 +91,12 @@ swift test -c release
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the code layout and checks.
 Bug reports with a reproducible query or navigation sequence are welcome.
 
+## License
+
+FinderSearch is licensed under the [MIT license](LICENSE). You can use, modify,
+redistribute, and sell it, including in commercial projects, provided you retain
+the copyright and license notice.
+
 ## Credit
 
 The search engine is **[fsearch](https://github.com/noahdunnagan/fsearch)** by

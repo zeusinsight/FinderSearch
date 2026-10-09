@@ -1,5 +1,7 @@
 # FinderSearch
 
+<img src="assets/logo.png" alt="FinderSearch logo" width="96" height="96">
+
 A native Mac file browser built around fast filename search.
 
 FinderSearch puts [fsearch](https://github.com/noahdunnagan/fsearch) behind a familiar

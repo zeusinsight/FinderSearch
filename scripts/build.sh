@@ -23,6 +23,7 @@ swift build -c release
 swift_bin="$(swift build -c release --show-bin-path)"
 app="$PWD/dist/FinderSearch.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
+./scripts/build-icon.sh "$app/Contents/Resources/AppIcon.icns"
 cp "$swift_bin/FinderSearch" "$app/Contents/MacOS/"
 cp vendor/fsearch/target/release/fsearch "$app/Contents/Helpers/"
 cp vendor/fsearch/LICENSE "$app/Contents/Resources/fsearch-LICENSE"
@@ -36,9 +37,10 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>FinderSearch</string>
 <key>CFBundleIdentifier</key><string>local.findersearch.app</string>
 <key>CFBundleName</key><string>FinderSearch</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>0.3.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.1</string>
+<key>CFBundleVersion</key><string>0.3.1</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

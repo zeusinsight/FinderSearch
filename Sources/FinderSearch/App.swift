@@ -10,6 +10,10 @@ import UniformTypeIdentifiers
     var body: some Scene {
         WindowGroup(id: "browser") {
             BrowserRoot().frame(minWidth: 850, minHeight: 470).onAppear {
+                if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+                    let icon = NSImage(contentsOf: url) {
+                    NSApp.applicationIconImage = icon
+                }
                 NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
             }
         }

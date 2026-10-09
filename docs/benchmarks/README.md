@@ -29,7 +29,7 @@ every run. Fixtures are removed at the end.
 Spotlight is the indexing/search service behind Finder. This harness uses its
 public metadata API; it does not instrument Finder's own internal query lifecycle,
 ranking, result rendering, or UI caching. fsearch also supports fuzzy queries,
-which this exact-filename comparison does not measure. The UI's 300 ms debounce,
+which this exact-filename comparison does not measure. The UI's 150 ms debounce,
 folder browsing, thumbnails, and whole-disk search are outside this benchmark.
 
 ## Reproduce

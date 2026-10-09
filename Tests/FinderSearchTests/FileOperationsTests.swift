@@ -1,7 +1,94 @@
 import XCTest
+import AppKit
 @testable import FinderSearch
 
 final class FileOperationsTests: XCTestCase {
+    @MainActor func testNewTextFileAvoidsCollisionsAndSupportsUndoRedo() async throws {
+        let existing = try write("untitled.txt")
+        let model = SearchModel(); model.location = folder; model.route = folder.path
+        model.newTextFile(); try await waitForOperation(model)
+        let created = folder.appendingPathComponent("untitled 2.txt")
+        XCTAssertEqual(try Data(contentsOf: created), Data())
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "original")
+        XCTAssertTrue(model.hits.contains { $0.path == created.path && $0.kind == "file" })
+        model.undo(); try await waitForOperation(model)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: created.path))
+        model.redo(); try await waitForOperation(model)
+        XCTAssertEqual(try Data(contentsOf: created), Data())
+        let collision = LocalFiles.apply([.textFile(existing)])
+        XCTAssertEqual(collision.failed.count, 1)
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "original")
+    }
+    @MainActor func testInlineRenameValidatesAndCancelsWithoutChangingFile() throws {
+        let url = try write("original.txt")
+        let hit = try Hit.read(url)
+        let model = SearchModel(); model.hits = [hit]; model.selection = [hit.path]
+        model.rename()
+        XCTAssertEqual(model.renaming, hit)
+        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.commitRename("bad/name"))
+        XCTAssertEqual(model.renaming, hit)
+        XCTAssertNotNil(model.error)
+        model.cancelRename()
+        XCTAssertNil(model.renaming)
+        XCTAssertTrue(model.undoStack.isEmpty)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "original")
+    }
+    @MainActor func testInlineRenameCommitsOptimisticallyAndSupportsUndo() async throws {
+        let url = try write("original.txt")
+        let hit = try Hit.read(url)
+        let model = SearchModel(); model.location = folder; model.route = folder.path
+        model.hits = [hit]; model.selection = [hit.path]
+        model.rename()
+        XCTAssertTrue(model.commitRename("renamed.txt"))
+        XCTAssertNil(model.renaming)
+        let destination = folder.appendingPathComponent("renamed.txt")
+        XCTAssertEqual(model.hits.first?.path, destination.path)
+        try await waitForOperation(model)
+        XCTAssertEqual(model.selection, [destination.path])
+        for _ in 0..<100 {
+            if !model.loading && !model.sorting { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.selection, [destination.path])
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "original")
+        model.undo(); try await waitForOperation(model)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "original")
+    }
+    @MainActor func testRenamingCurrentFolderUpdatesItsLocationAndUndo() async throws {
+        let child = folder.appendingPathComponent("child", isDirectory: true)
+        let renamed = folder.appendingPathComponent("renamed", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        let hit = try Hit.read(child)
+        let model = SearchModel(); model.location = child; model.route = child.path
+        model.extraHits = [hit]; model.selection = [hit.path]
+        model.rename(); XCTAssertTrue(model.commitRename("renamed"))
+        try await waitForOperation(model)
+        XCTAssertEqual(model.location.path, renamed.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        model.undo(); try await waitForOperation(model)
+        XCTAssertEqual(model.location.path, child.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: child.path))
+    }
+    @MainActor func testNativeRenameEditorHandlesReturnAndEscape() throws {
+        let url = try write("report😀.txt")
+        let hit = try Hit.read(url)
+        XCTAssertEqual(RenameTextField.selectedNameRange(hit), NSRange(location: 0, length: 8))
+        let model = SearchModel(); model.hits = [hit]; model.selection = [hit.path]; model.rename()
+        let field = RenameTextField(string: hit.name)
+        field.begin(hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+        let editor = NSTextView(); editor.string = "bad/name"
+        XCTAssertTrue(field.control(field, textView: editor,
+            doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertNotNil(model.renaming, "Invalid input keeps editing active")
+        field.stringValue = "bad/name"
+        XCTAssertTrue(field.control(field, textView: editor,
+            doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        XCTAssertNil(model.renaming)
+        XCTAssertNil(field.editingPath)
+        XCTAssertEqual(field.stringValue, hit.name)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
     var folder: URL!
     override func setUpWithError() throws {
         folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
@@ -73,6 +160,169 @@ final class FileOperationsTests: XCTestCase {
         for _ in 0..<100 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(20)) }
         XCTFail("File operation timed out")
     }
+    @MainActor func testSlowCommandPreparationKeepsMainActorAvailable() async throws {
+        let model = SearchModel()
+        model.navigate(folder)
+        let destination = folder.appendingPathComponent("prepared folder")
+        model.prepareOperations(name: "New Folder") {
+            XCTAssertFalse(Thread.isMainThread)
+            Thread.sleep(forTimeInterval: 0.15)
+            return [.folder(destination)]
+        }
+        XCTAssertTrue(model.busy)
+        var heartbeats = 0
+        for _ in 0..<200 {
+            if !model.busy { break }
+            heartbeats += 1
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertFalse(model.busy)
+        XCTAssertGreaterThan(heartbeats, 5, "Slow filesystem preparation must allow UI work to run")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(model.undoStack.last?.name, "New Folder")
+    }
+    @MainActor func testCommandPreparationFailurePreservesFilesAndReportsError() async throws {
+        let source = try write("source.txt")
+        let child = folder.appendingPathComponent("child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        let model = SearchModel()
+        model.navigate(folder)
+        model.transfer([folder], to: child, move: true)
+        try await waitForOperation(model)
+        XCTAssertEqual(model.error, "A folder cannot be moved or copied inside itself.")
+        XCTAssertTrue(model.undoStack.isEmpty)
+        XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "original")
+    }
+    @MainActor func testOptimisticRenameAndPartialFailureReconcileWithUndo() async throws {
+        let a = try write("a.txt"), b = try write("b.txt"), existing = try write("existing.txt", "keep")
+        let renamed = folder.appendingPathComponent("renamed.txt")
+        let model = SearchModel(); model.navigate(folder)
+        for _ in 0..<100 {
+            if !model.loading { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        model.selection = [a.path]
+        model.perform([.move(a, renamed), .move(b, existing)], name: "Move")
+        XCTAssertTrue(model.busy)
+        XCTAssertTrue(model.hits.contains { $0.path == renamed.path })
+        XCTAssertFalse(model.hits.contains { $0.path == a.path })
+        XCTAssertEqual(model.selection, [renamed.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: a.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: renamed.path))
+        try await waitForOperation(model)
+        XCTAssertNotNil(model.error)
+        XCTAssertTrue(model.hits.contains { $0.path == b.path })
+        XCTAssertTrue(model.hits.contains { $0.path == renamed.path })
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "keep")
+        XCTAssertEqual(model.undoStack.count, 1)
+        model.undo()
+        XCTAssertTrue(model.hits.contains { $0.path == a.path })
+        XCTAssertFalse(model.hits.contains { $0.path == renamed.path })
+        try await waitForOperation(model)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: a.path))
+    }
+
+    @MainActor func testOptimisticTrashImmediatelyRemovesRowAndUndoRestoresIt() async throws {
+        let source = try write("optimistic-trash.txt")
+        let model = SearchModel(); model.navigate(folder)
+        for _ in 0..<100 {
+            if !model.loading { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        model.selection = [source.path]
+        model.trash()
+        XCTAssertTrue(model.hits.isEmpty)
+        XCTAssertTrue(model.selection.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        try await waitForOperation(model)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        model.undo()
+        try await waitForOperation(model)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @MainActor func testFailedOptimisticMoveRestoresOriginalRowAndSelection() async throws {
+        let source = try write("source.txt"), collision = try write("collision.txt", "keep")
+        let model = SearchModel(); model.navigate(folder)
+        for _ in 0..<100 {
+            if !model.loading { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        model.selection = [source.path]
+        model.perform([.move(source, collision)], name: "Rename")
+        try await waitForOperation(model)
+        XCTAssertTrue(model.hits.contains { $0.path == source.path })
+        XCTAssertEqual(model.selection, [source.path])
+        XCTAssertNotNil(model.error)
+        XCTAssertTrue(model.undoStack.isEmpty)
+        XCTAssertEqual(try String(contentsOf: collision, encoding: .utf8), "keep")
+    }
+
+    @MainActor func testPrefetchedFolderAppearsImmediatelyThenRefreshes() async throws {
+        let target = URL(fileURLWithPath: "/tmp/FinderSearch-prefetch-" + UUID().uuidString)
+        let loader = PreviewFolderLoader(folder: target)
+        let model = SearchModel(folderLoader: { try await loader.load($0, $1) })
+        await model.prefetchFolder(target)?.value
+        model.navigate(target)
+        XCTAssertFalse(model.loading)
+        XCTAssertEqual(model.hits.map(\.name), ["cached.txt"])
+        for _ in 0..<100 {
+            if model.hits.first?.name == "fresh.txt" { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.hits.map(\.name), ["fresh.txt"])
+    }
+
+    @MainActor func testUncachedFolderShowsNamesBeforeMetadataArrives() async throws {
+        let target = URL(fileURLWithPath: "/tmp/FinderSearch-progressive-" + UUID().uuidString)
+        let path = target.appendingPathComponent("example.txt").path
+        let model = SearchModel(
+            folderLoader: { _, _ in
+                try await Task.sleep(for: .milliseconds(300))
+                return [Hit(path: path, kind: "file", size: 42, mtime: 1234, score: 0)]
+            },
+            folderPreviewLoader: { _, _ in
+                [Hit(path: path, kind: "file", size: 0, mtime: 0, score: 0, metadataPending: true)]
+            })
+        model.navigate(target)
+        XCTAssertTrue(model.loading)
+        for _ in 0..<100 {
+            if !model.hits.isEmpty { break }; try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(model.hits.map(\.name), ["example.txt"])
+        XCTAssertTrue(model.loading, "Names must be visible while metadata is still loading")
+        XCTAssertEqual(model.hits.first?.metadataPending, true)
+        model.selection = [path]
+        for _ in 0..<100 {
+            if !model.loading { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.loading)
+        XCTAssertEqual(model.hits.first?.size, 42)
+        XCTAssertEqual(model.hits.first?.mtime, 1234)
+        XCTAssertNotEqual(model.hits.first?.metadataPending, true)
+        XCTAssertEqual(model.selection, [path])
+    }
+
+    func testDirectoryPreviewIncludesNamesAndBasicKindsWithoutMetadata() async throws {
+        let child = folder.appendingPathComponent("Child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        _ = try write("visible.txt"); _ = try write(".hidden.txt")
+        let preview = try await LocalFiles.preview(folder, hidden: false)
+        XCTAssertEqual(Set(preview.map(\.name)), ["Child", "visible.txt"])
+        XCTAssertEqual(preview.first { $0.name == "Child" }?.kind, "dir")
+        XCTAssertTrue(preview.allSatisfy { $0.metadataPending == true })
+    }
+
+    @MainActor func testPrefetchedPermissionFailureClearsPreviewAndShowsError() async throws {
+        let target = URL(fileURLWithPath: "/tmp/FinderSearch-prefetch-" + UUID().uuidString)
+        let loader = PreviewFolderLoader(folder: target, failRefresh: true)
+        let model = SearchModel(folderLoader: { try await loader.load($0, $1) })
+        await model.prefetchFolder(target)?.value
+        model.navigate(target)
+        XCTAssertEqual(model.hits.map(\.name), ["cached.txt"])
+        for _ in 0..<100 {
+            if model.error != nil { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(model.error)
+        XCTAssertTrue(model.hits.isEmpty)
+    }
     @MainActor func testFailedUndoRemainsRecoverable() async throws {
         let a = try write("a.txt"), b = folder.appendingPathComponent("b.txt")
         let model = SearchModel(); model.navigate(folder)
@@ -91,6 +341,7 @@ final class FileOperationsTests: XCTestCase {
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
         let model = SearchModel(); model.navigate(folder)
         model.transfer([folder], to: child, move: true)
+        try await waitForOperation(model)
         XCTAssertFalse(model.busy); XCTAssertNotNil(model.error)
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
     }
@@ -152,15 +403,24 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertEqual(model.hits.count, 2)
     }
 
-    @MainActor func testSortedCacheTracksSortAndHiddenChanges() {
+    @MainActor func testSortedCacheTracksSortAndHiddenChanges() async throws {
         let model = SearchModel()
         model.hits = [
             Hit(path: "/b.txt", kind: "file", size: 2, mtime: 0, score: 0),
             Hit(path: "/a.txt", kind: "file", size: 1, mtime: 0, score: 0),
             Hit(path: "/.hidden", kind: "file", size: 0, mtime: 0, score: 0),
         ]
+        for _ in 0..<100 {
+            if !model.sorting { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.sorting)
         XCTAssertEqual(model.sortedHits.map(\.name), ["a.txt", "b.txt"])
         model.ascending = false
+        XCTAssertEqual(model.sortedHits.map(\.name), ["a.txt", "b.txt"], "Keep rows until the new order is ready")
+        for _ in 0..<100 {
+            if !model.sorting { break }; try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.sorting)
         XCTAssertEqual(model.sortedHits.map(\.name), ["b.txt", "a.txt"])
         model.showHidden = true
         XCTAssertEqual(model.sortedHits.count, 3)
@@ -190,10 +450,13 @@ final class FileOperationsTests: XCTestCase {
         model.query = "fi"
         try await Task.sleep(for: .milliseconds(100))
         model.query = "finder"
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(50))
         let early = await engine.queries
         XCTAssertTrue(early.isEmpty)
-        try await Task.sleep(for: .milliseconds(200))
+        for _ in 0..<50 {
+            if !(await engine.queries).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         let final = await engine.queries
         XCTAssertEqual(final, ["finder"])
     }
@@ -230,6 +493,21 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertFalse(model.fullDiskAccess)
     }
 
+}
+
+private actor PreviewFolderLoader {
+    let folder: URL
+    let failRefresh: Bool
+    private var requests = 0
+    init(folder: URL, failRefresh: Bool = false) {
+        self.folder = folder; self.failRefresh = failRefresh
+    }
+    func load(_ folder: URL, _ hidden: Bool) throws -> [Hit] {
+        requests += 1
+        if requests > 1 && failRefresh { throw CocoaError(.fileReadNoPermission) }
+        return [Hit(path: folder.appendingPathComponent(requests == 1 ? "cached.txt" : "fresh.txt").path,
+            kind: "file", size: 1, mtime: 0, score: 0)]
+    }
 }
 
 private final class DiskAccessProbe: @unchecked Sendable {

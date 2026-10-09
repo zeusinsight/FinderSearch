@@ -7,6 +7,7 @@ import AppKit
     @ObservedObject var model: SearchModel
     let focusFiles: () -> Void
     let newTab: (URL) -> Void
+    var addFavorite: (URL) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView { makeView(coordinator: context.coordinator) }
@@ -51,10 +52,24 @@ import AppKit
         private var items: [Hit] = []
         private var rowByPath: [String: Int] = [:]
         private var updating = false
+        private weak var renameField: RenameTextField?
         private var actions: [Int: @MainActor () -> Void] = [:]
         init(_ parent: FileList) { self.parent = parent }
         func update() {
             guard let table else { return }
+            if let hit = parent.model.renaming, let row = rowByPath[hit.path] {
+                // Do not rebuild a live field editor when metadata or sorting
+                // finishes; its draft and selection belong to the user.
+                table.scrollRowToVisible(row)
+                if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? FileCell,
+                    let field = cell.textField as? RenameTextField {
+                    let model = parent.model
+                    renameField = field
+                    field.begin(hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+                }
+                return
+            }
+            if renameField?.editingPath != nil { renameField?.cancelEditing() }
             updating = true; defer { updating = false }
             let next = parent.model.sortedHits
             table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("where"))?.isHidden =
@@ -95,10 +110,11 @@ import AppKit
             switch key {
             case "name": cell.textField?.stringValue = hit.name
             case "modified":
-                cell.textField?.stringValue = Self.dateFormatter.string(from: hit.modified)
+                cell.textField?.stringValue = hit.metadataPending == true
+                    ? "—" : Self.dateFormatter.string(from: hit.modified)
             case "size":
                 cell.textField?.stringValue =
-                    hit.kind == "dir"
+                    hit.kind == "dir" || hit.metadataPending == true
                     ? "—" : Self.sizeFormatter.string(fromByteCount: Int64(clamping: hit.size))
             case "kind": cell.textField?.stringValue = hit.typeName
             default: cell.textField?.stringValue = hit.parent
@@ -108,8 +124,9 @@ import AppKit
             if key == "name" {
                 cell.imageView?.image = FileIcons.shared.placeholder(hit)
                 cell.iconTask?.cancel()
+                guard hit.metadataPending != true else { cell.iconTask = nil; return cell }
                 cell.iconTask = Task { @MainActor [weak cell] in
-                    let icon = await FileIcons.shared.load(hit)
+                    guard let icon = await FileIcons.shared.load(hit) else { return }
                     guard !Task.isCancelled, let cell, cell.path == hit.path else { return }
                     cell.imageView?.image = icon
                 }
@@ -124,6 +141,7 @@ import AppKit
         }()
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !updating, let table else { return }
+            parent.model.cancelRename()
             parent.focusFiles(); table.window?.makeFirstResponder(table)
             parent.model.selection = Set(
                 table.selectedRowIndexes.compactMap {
@@ -189,46 +207,48 @@ import AppKit
         func menu(for row: Int) -> NSMenu {
             let menu = NSMenu(); actions.removeAll()
             guard let table else { return menu }
+            let model = parent.model
+            @discardableResult func add(
+                _ title: String, enabled: Bool = true, to submenu: NSMenu? = nil,
+                _ action: @escaping @MainActor () -> Void
+            ) -> NSMenuItem {
+                let item = NSMenuItem(
+                    title: title, action: #selector(runMenuAction(_:)), keyEquivalent: "")
+                item.target = self; item.tag = actions.count; item.isEnabled = enabled
+                actions[item.tag] = action; (submenu ?? menu).addItem(item)
+                return item
+            }
+            menu.autoenablesItems = false
             if !items.indices.contains(row) {
-                menu.autoenablesItems = false
-                let backgroundActions: [(String, Bool, @MainActor () -> Void)] = [
-                    (
-                        "New Folder", parent.model.canWriteHere && !parent.model.busy,
-                        { [weak self] in self?.parent.model.newFolder() }
-                    ),
-                    (
-                        "Paste Items", parent.model.canWriteHere && !parent.model.busy,
-                        { [weak self] in self?.parent.model.paste() }
-                    ),
-                    (
-                        "Open in New Tab", true,
-                        { [weak self] in
-                            guard let self else { return };
-                            self.parent.newTab(self.parent.model.location)
-                        }
-                    ),
-                ]
-                for (title, enabled, action) in backgroundActions {
-                    let item = NSMenuItem(
-                        title: title, action: #selector(runMenuAction(_:)), keyEquivalent: "")
-                    item.target = self; item.tag = actions.count; item.isEnabled = enabled;
-                    actions[item.tag] = action; menu.addItem(item)
+                let writable = model.canWriteHere && !model.busy
+                add("New Folder", enabled: writable) { model.newFolder() }
+                add("New Text File", enabled: writable) { model.newTextFile() }
+                add("Paste Items", enabled: writable) { model.paste() }
+                add("Move Items Here", enabled: writable) { model.paste(move: true) }
+                menu.addItem(.separator())
+                add("Open in New Tab", enabled: model.canWriteHere) { [weak self] in
+                    self?.parent.newTab(model.location)
                 }
+                add("Add Folder to Sidebar", enabled: model.canWriteHere) { [weak self] in
+                    self?.parent.addFavorite(model.location)
+                }
+                menu.addItem(.separator())
+                let views = NSMenu(); views.autoenablesItems = false
+                for mode in FileViewMode.allCases {
+                    let item = add(mode.title, to: views) { model.viewMode = mode }
+                    item.state = model.viewMode == mode ? .on : .off
+                }
+                let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+                viewItem.submenu = views; menu.addItem(viewItem)
+                let hidden = add("Show Hidden Files") { model.showHidden.toggle() }
+                hidden.state = model.showHidden ? .on : .off
+                add("Refresh", enabled: !model.busy) { model.schedule() }
                 return menu
             }
             if !table.selectedRowIndexes.contains(row) {
                 table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
-            let hit = items[row], model = parent.model
-            func add(
-                _ title: String, enabled: Bool = true, _ action: @escaping @MainActor () -> Void
-            ) {
-                let item = NSMenuItem(
-                    title: title, action: #selector(runMenuAction(_:)), keyEquivalent: "")
-                item.target = self; item.tag = actions.count; item.isEnabled = enabled;
-                actions[item.tag] = action; menu.addItem(item)
-            }
-            menu.autoenablesItems = false
+            let hit = items[row]
             add("Open") { model.open(hit) }
             add("Open in New Tab", enabled: hit.isFolder) { [weak self] in
                 self?.parent.newTab(hit.url)
@@ -269,7 +289,7 @@ import AppKit
     var iconTask: Task<Void, Never>?
     init(identifier: NSUserInterfaceItemIdentifier, withIcon: Bool) {
         super.init(frame: .zero); self.identifier = identifier
-        let text = NSTextField(labelWithString: ""); text.font = .systemFont(ofSize: 12);
+        let text = RenameTextField(labelWithString: ""); text.font = .systemFont(ofSize: 12);
         text.lineBreakMode = .byTruncatingTail;
         text.translatesAutoresizingMaskIntoConstraints = false
         textField = text; addSubview(text)

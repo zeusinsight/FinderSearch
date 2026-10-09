@@ -84,7 +84,12 @@ opening or previewing a cloud file may trigger a provider download.
 
 - **Browse:** icons, sortable list, columns, and gallery via Command-1 through Command-4.
   Back/forward/up navigation, a path bar, favorites, mounted volumes, and iCloud's local folder.
-- **Search:** Command-F; requests begin 300 ms after typing stops. Search This Mac or
+  Eject buttons beside external/removable volumes and disk images safely unmount them.
+  Right-click empty space for New Folder, New Text File, Paste, view options, and Refresh; right-click
+  files for their actions in every view, including columns and gallery.
+  Rename edits the name in place: Return saves, Escape or clicking away cancels.
+  Files initially select their name without the extension; folders select the whole name.
+- **Search:** Command-F; requests begin 150 ms after typing stops. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
 - **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
@@ -115,9 +120,32 @@ background. Clearing a search restores the browsing snapshot and sort immediatel
 Uncached listings show inexpensive layout-matched skeletons until loading completes.
 Each tab retains up to eight snapshots, evicting older entries above a 40,000-item
 budget (a single larger view remains available).
+Local child folders are prefetched in bounded batches, and hovering a folder in
+icon or column view prepares its contents. Cached or prefetched contents appear
+immediately on navigation and refresh from disk. On an uncached first visit,
+the loading view appears immediately, then a lightweight directory listing shows
+filenames and basic folder kinds before dates and sizes finish loading. Pending
+details show a dash rather than invented values, and selection survives the refresh.
+Known network/cloud locations and protected home folders without Full Disk Access
+are excluded from speculative prefetching.
+
+Rename, move, and Trash update the visible listing immediately while the operation
+runs. Known copies and new folders can also appear immediately. Pending operations
+keep the busy indicator visible and block further writes and opens. Failed items
+return to their original state with an error; successful items retain undo even
+when other items in the batch fail. A background listing confirms the final result.
+Unique-name checks, transfer validation, and tag reads run in the background;
+the busy indicator covers this preparation as well as the write itself.
 
 List view uses reusable, fixed-height AppKit rows. Icons load on a background queue
 with bounded concurrency and caching; gallery thumbnails load lazily and are cached.
+Folder and search results are sorted in the background before display, with
+filenames and file types prepared once per sort. Changing the sort keeps current
+rows visible until the new order is ready; abandoned sorts cannot replace newer
+results. Get Info and Spotlight tag results also load file metadata off the UI thread.
+Leaving a view cancels pending
+icon work and Quick Look thumbnail requests. Column folders open on the first
+selection without waiting for a possible double-click.
 Folder-event bursts are coalesced, and obsolete enumeration is cancelled cooperatively.
 Engine cancellation releases the stdio client; it does not interrupt daemon computation
 or a blocked filesystem call. Cold folders and slow volumes can still take time.
@@ -143,8 +171,9 @@ native interface conventions.
 
 No Finder extensions, AirDrop integration, disclosure rows, advanced grouping,
 batch rename, smart folders, cloud-management UI, or persistent session/undo state.
-Column ancestors remain snapshots until revisited. New Folder/Rename use dialogs
-rather than inline editing. Clipboard/drop conflicts have no merge/overwrite dialog.
+Column ancestors remain snapshots until revisited. New Text File creates an empty
+`untitled.txt` with a unique name; Rename edits names inline. Clipboard/drop conflicts
+have no merge/overwrite dialog.
 Full keyboard/multi-drag parity remains in progress.
 
 ## Credits

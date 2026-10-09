@@ -8,10 +8,12 @@ struct Hit: Decodable, Identifiable, Hashable {
     let size: UInt64
     let mtime: UInt64
     let score: Int64
-    var url: URL { URL(fileURLWithPath: path) }
-    var name: String { url.lastPathComponent }
+    var metadataPending: Bool? = nil
+    var url: URL { URL(fileURLWithPath: path, isDirectory: kind == "dir") }
+    var name: String { (path as NSString).lastPathComponent }
+    var imageKey: String { path + ":" + String(mtime) + ":" + String(metadataPending == true) }
     var parent: String {
-        url.deletingLastPathComponent().path.replacingOccurrences(
+        (path as NSString).deletingLastPathComponent.replacingOccurrences(
             of: NSHomeDirectory(), with: "~", options: .anchored)
     }
 }

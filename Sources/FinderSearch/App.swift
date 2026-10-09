@@ -108,76 +108,26 @@ struct BrowserRoot: View {
 struct BrowserView: View {
     @ObservedObject var workspace: BrowserWorkspace
     @ObservedObject var model: SearchModel
-    @FocusState private var filesFocused: Bool
-    @FocusState private var searchFocused: Bool
+    private enum KeyboardFocus: Hashable { case files, search }
+    @FocusState private var keyboardFocus: KeyboardFocus?
+    private var searchFocused: Bool { keyboardFocus == .search }
     @State private var fileNavigationActive = false
     @State private var keyMonitor: Any?
     @State private var iconSize: Double = 64
     @State private var gridColumns = 5
-    private let home = NSHomeDirectory()
-    private let tags: [(String, Color)] = [
-        ("Red", .red), ("Orange", .orange), ("Yellow", .yellow), ("Green", .green), ("Blue", .blue),
-        ("Purple", .purple), ("Gray", .gray),
-    ]
+    private let tags = SidebarTags.values
     var body: some View {
         NavigationSplitView {
-            List(
-                selection: Binding(
-                    get: { model.route },
-                    set: {
-                        fileNavigationActive = false; model.sidebar($0)
-                    })
-            ) {
-                Label("Recents", systemImage: "clock").tag("recents")
-                Section("Favorites") {
-                    sidebar("Applications", "a.square", "/Applications")
-                    sidebar("Documents", "doc", home + "/Documents")
-                    sidebar("Downloads", "arrow.down.circle", home + "/Downloads")
-                    sidebar("Desktop", "menubar.dock.rectangle", home + "/Desktop")
-                    sidebar("Pictures", "photo", home + "/Pictures")
-                    sidebar("Music", "music.note", home + "/Music")
-                    sidebar("Movies", "film", home + "/Movies")
-                    ForEach(workspace.favorites, id: \.self) { path in
-                        sidebar(URL(fileURLWithPath: path).lastPathComponent, "folder", path)
-                            .contextMenu {
-                                Button("Remove from Sidebar") { workspace.removeFavorite(path) }
-                            }
-                    }
-                }
-                Section("Locations") {
-                    sidebar(
-                        "iCloud Drive", "icloud",
-                        home + "/Library/Mobile Documents/com~apple~CloudDocs")
-                    sidebar(URL(fileURLWithPath: home).lastPathComponent, "house", home)
-                    ForEach(workspace.volumes, id: \.path) { url in
-                        sidebar(
-                            url.path == "/" ? "Macintosh HD" : url.lastPathComponent,
-                            "externaldrive", url.path)
-                    }
-                }
-                Section("Tags") {
-                    ForEach(tags, id: \.0) { name, color in
-                        Label {
-                            Text(name)
-                        } icon: {
-                            Image(systemName: "circle.fill").font(.system(size: 10))
-                                .foregroundStyle(color)
-                        }.tag("tag:" + name)
-                    }
-                }
-            }
-            .listStyle(.sidebar).navigationSplitViewColumnWidth(min: 170, ideal: 208, max: 280)
-            .safeAreaInset(edge: .bottom) {
-                if model.ready && !model.fullDiskAccess {
-                    Button("Enable Full Disk Access…") {
-                        NSWorkspace.shared.open(
-                            URL(
-                                string:
-                                    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-                            )!)
-                    }.font(.caption).padding(12)
-                }
-            }
+            BrowserSidebar(
+                state: SidebarState(route: model.route, favorites: workspace.favorites,
+                    volumes: workspace.volumes, ejectingVolumes: workspace.ejectingVolumes,
+                    showDiskAccessHint: model.ready && !model.fullDiskAccess),
+                select: { route in
+                    fileNavigationActive = false; model.sidebar(route)
+                },
+                removeFavorite: { workspace.removeFavorite($0) },
+                eject: { volume in workspace.eject(volume) { model.error = $0 } }
+            ).equatable()
         } detail: {
             VStack(spacing: 0) {
                 if workspace.tabs.count > 1 { tabBar }
@@ -195,10 +145,11 @@ struct BrowserView: View {
                 }
                 fileContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .contextMenu { backgroundActions }
                     .modifier(SafeBackgroundDropTarget(model: model))
-                    .focusable(model.viewMode == .icons || model.viewMode == .gallery).focused(
-                        $filesFocused
-                    ).focusEffectDisabled()
+                    .focusable(model.viewMode == .icons || model.viewMode == .gallery)
+                    .focused($keyboardFocus, equals: .files).focusEffectDisabled()
                 pathBar
                 statusBar
             }
@@ -219,11 +170,7 @@ struct BrowserView: View {
                     }
                 }
                 ToolbarItem {
-                    Picker("View", selection: $model.viewMode) {
-                        ForEach(FileViewMode.allCases, id: \.self) { mode in
-                            Image(systemName: mode.symbol).tag(mode).help(mode.title)
-                        }
-                    }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                    ViewModePicker(selection: $model.viewMode).frame(width: 150, height: 28)
                 }
                 ToolbarItem {
                     Menu {
@@ -259,7 +206,7 @@ struct BrowserView: View {
                 }
             }
             .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
-            .searchFocused($searchFocused)
+            .searchFocused($keyboardFocus, equals: .search)
         }
         .onAppear {
             model.start()
@@ -298,7 +245,7 @@ struct BrowserView: View {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }; keyMonitor = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
-            fileNavigationActive = false; model.sort = .relevance; searchFocused = true
+            fileNavigationActive = false; model.sort = .relevance; keyboardFocus = .search
         }
         .onReceive(
             NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
@@ -307,9 +254,16 @@ struct BrowserView: View {
             NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)
         ) { _ in workspace.refreshVolumes() }
         .onChange(of: model.viewMode) { _, _ in
+            model.cancelRename()
             model.extraHits = []; model.selection.formIntersection(Set(model.hits.map(\.path)))
         }
-        .onChange(of: searchFocused) { _, focused in if focused { fileNavigationActive = false } }
+        .onChange(of: model.renaming) { _, hit in
+            if hit != nil { keyboardFocus = nil; fileNavigationActive = false }
+            else if !searchFocused { fileNavigationActive = true }
+        }
+        .onChange(of: keyboardFocus) { _, focus in
+            if focus == .search { fileNavigationActive = false }
+        }
         .onChange(of: model.query) { _, text in
             if model.isSearch && model.sort != .relevance { model.sort = .relevance }
         }
@@ -324,9 +278,6 @@ struct BrowserView: View {
                 }.padding(); Divider(); QuickLook(url: hit.url).frame(minWidth: 650, minHeight: 470)
             }
         }
-    }
-    private func sidebar(_ name: String, _ symbol: String, _ path: String) -> some View {
-        Label(name, systemImage: symbol).tag(path)
     }
     private var tabBar: some View {
         HStack(spacing: 0) {
@@ -371,7 +322,7 @@ struct BrowserView: View {
     }
     @ViewBuilder private var fileContent: some View {
         if model.viewMode == .columns && model.canWriteHere {
-            ColumnBrowser(model: model, focusFiles: { focusFiles() })
+            ColumnBrowser(model: model, focusFiles: { focusFiles() }, rowMenu: rowActions)
         } else if (model.loading || model.searching) && model.sortedHits.isEmpty {
             FolderLoadingSkeleton(mode: model.viewMode, iconSize: iconSize)
         } else if model.sortedHits.isEmpty {
@@ -390,7 +341,7 @@ struct BrowserView: View {
             case .list: fileTable
             case .columns:
                 fileTable
-            case .gallery: GalleryBrowser(model: model, select: select)
+            case .gallery: GalleryBrowser(model: model, select: select, rowMenu: rowActions)
             }
         }
     }
@@ -417,17 +368,12 @@ struct BrowserView: View {
             }
             .onChange(of: model.focusedPath) { _, path in if let path { proxy.scrollTo(path) } }
         }
-        .contextMenu {
-            Button("New Folder") { model.newFolder() }
-            Button("Paste Items") { model.paste() }
-            Button("Add to Sidebar") { workspace.addFavorite(model.location) }
-        }
     }
     private func iconCell(_ hit: Hit) -> some View {
         VStack(spacing: 6) {
             FileThumbnail(hit: hit, size: iconSize).frame(
                 width: iconSize + 10, height: iconSize + 10)
-            Text(hit.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center)
+            FileNameLabel(model: model, hit: hit, lineLimit: 2, centered: true)
                 .frame(height: 32, alignment: .top)
         }
         .padding(6).frame(maxWidth: .infinity)
@@ -440,12 +386,14 @@ struct BrowserView: View {
         }.onTapGesture { select(hit) }
         .contextMenu { rowActions(hit) }.draggable(hit.url)
         .modifier(FolderDropTarget(hit: hit, model: model))
+        .onHover { hovering in if hovering && hit.isFolder { model.prefetchFolder(hit.url) } }
         .id(hit.path)
         .accessibilityLabel(hit.name).accessibilityAddTraits(
             model.selection.contains(hit.path) ? [.isSelected] : [])
     }
     private var fileTable: some View {
-        FileList(model: model, focusFiles: focusFiles, newTab: { workspace.newTab($0) })
+        FileList(model: model, focusFiles: focusFiles, newTab: { workspace.newTab($0) },
+            addFavorite: { workspace.addFavorite($0) })
     }
     private var pathBar: some View {
         VStack(spacing: 0) {
@@ -481,7 +429,9 @@ struct BrowserView: View {
     }
     private var statusBar: some View {
         HStack {
-            if model.loading || model.searching || model.busy { ProgressView().controlSize(.mini) }
+            if model.loading || model.searching || model.sorting || model.busy {
+                ProgressView().controlSize(.mini)
+            }
             Text(
                 model.selection.isEmpty
                     ? (model.isSearch && model.hits.count == 500
@@ -498,6 +448,23 @@ struct BrowserView: View {
         }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 14).frame(
             height: 28
         ).background(Color(nsColor: .windowBackgroundColor))
+    }
+    @ViewBuilder private var backgroundActions: some View {
+        Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
+        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
+        Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
+        Button("Move Items Here") { model.paste(move: true) }.disabled(model.busy || !model.canWriteHere)
+        Divider()
+        Button("Open in New Tab") { workspace.newTab(model.location) }.disabled(!model.canWriteHere)
+        Button("Add Folder to Sidebar") { workspace.addFavorite(model.location) }.disabled(!model.canWriteHere)
+        Divider()
+        Menu("View") {
+            ForEach(FileViewMode.allCases, id: \.self) { mode in
+                Button(mode.title) { model.viewMode = mode }
+            }
+        }
+        Toggle("Show Hidden Files", isOn: $model.showHidden)
+        Button("Refresh") { model.schedule() }.disabled(model.busy)
     }
     @ViewBuilder private var actions: some View {
         Button("Open") { model.open() }.disabled(model.selection.isEmpty)
@@ -516,6 +483,7 @@ struct BrowserView: View {
             model.busy || !model.canWriteHere)
         Divider()
         Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
+        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
         Button("Add Folder to Sidebar") {
             workspace.addFavorite(
                 model.selected?.isFolder == true ? model.selected!.url : model.location)
@@ -561,13 +529,14 @@ struct BrowserView: View {
         if !model.selection.contains(hit.path) { model.selection = [hit.path] }
     }
     private func focusFiles() {
-        searchFocused = false; fileNavigationActive = true
+        keyboardFocus = nil; fileNavigationActive = true
         if NSApp.keyWindow?.firstResponder is NSTextView {
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
-        filesFocused = model.viewMode == .icons || model.viewMode == .gallery
+        if model.viewMode == .icons || model.viewMode == .gallery { keyboardFocus = .files }
     }
     private func select(_ hit: Hit) {
+        guard model.renaming?.path != hit.path else { return }
         focusFiles()
         model.select(
             hit, extending: NSEvent.modifierFlags.contains(.shift),

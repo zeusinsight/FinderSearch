@@ -1,0 +1,21 @@
+# Generated builds and app bundles
+.build/
+.swiftpm/
+dist/
+vendor/fsearch/target/
+
+# Local editor, environment, and review files
+.DS_Store
+.idea/
+.vscode/
+*.xcuserstate
+xcuserdata/
+.env
+.env.*
+!.env.example
+*.local.json
+.impeccable/
+
+# Python artifacts
+__pycache__/
+*.py[cod]

@@ -198,6 +198,55 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertEqual(final, ["finder"])
     }
 
+    @MainActor func testDiskAccessRefreshesAfterGrantAndRevocationWithStaleDaemon() async {
+        let probe = DiskAccessProbe()
+        let model = SearchModel(
+            engine: StatusSearchEngine(fullDiskAccess: false),
+            diskAccessCheck: { probe.isGranted })
+        await model.refreshStatus()
+        XCTAssertTrue(model.ready)
+        XCTAssertFalse(model.fullDiskAccess)
+
+        probe.isGranted = true
+        await model.refreshStatus()
+        XCTAssertTrue(model.fullDiskAccess)
+
+        probe.isGranted = false
+        await model.refreshStatus()
+        XCTAssertFalse(model.fullDiskAccess)
+    }
+
+    @MainActor func testMissingDaemonPermissionFieldDoesNotHideGrantedAppAccess() async {
+        let model = SearchModel(
+            engine: StatusSearchEngine(fullDiskAccess: nil), diskAccessCheck: { true })
+        await model.refreshStatus()
+        XCTAssertTrue(model.fullDiskAccess)
+    }
+
+    @MainActor func testDaemonPermissionDoesNotOverrideDeniedAppAccess() async {
+        let model = SearchModel(
+            engine: StatusSearchEngine(fullDiskAccess: true), diskAccessCheck: { false })
+        await model.refreshStatus()
+        XCTAssertFalse(model.fullDiskAccess)
+    }
+
+}
+
+private final class DiskAccessProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var granted = false
+    var isGranted: Bool {
+        get { lock.withLock { granted } }
+        set { lock.withLock { granted = newValue } }
+    }
+}
+
+private struct StatusSearchEngine: SearchService {
+    let fullDiskAccess: Bool?
+    func request(_ fields: [String: Any]) async throws -> Reply {
+        Reply(ok: true, error: nil, hits: nil, took_us: nil, entries: 1,
+              full_disk_access: fullDiskAccess)
+    }
 }
 
 private actor RecordingSearchEngine: SearchService {

@@ -77,7 +77,14 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var backStack: [URL] = []
     @Published var forwardStack: [URL] = []
     private let engine: any SearchService
-    init(engine: any SearchService = Engine()) { self.engine = engine }
+    private let diskAccessCheck: @Sendable () -> Bool
+    init(
+        engine: any SearchService = Engine(),
+        diskAccessCheck: @escaping @Sendable () -> Bool = { FullDiskAccess.isGranted() }
+    ) {
+        self.engine = engine
+        self.diskAccessCheck = diskAccessCheck
+    }
     private var task: Task<Void, Never>?
     private var sortedCache: [Hit]?
     private var selectedCache: [Hit]?
@@ -334,18 +341,24 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     func monitor() async {
         guard !statusStarted else { return }; statusStarted = true
         while !Task.isCancelled {
-            do {
-                let status = try await engine.request(["op": "status"])
-                let becameReady = status.ok && !ready; if ready != status.ok { ready = status.ok }
-                if status.ok {
-                    if entries != status.entries ?? 0 { entries = status.entries ?? 0 };
-                    if fullDiskAccess != status.full_disk_access ?? false {
-                        fullDiskAccess = status.full_disk_access ?? false
-                    }; if becameReady && (isSearch || route == "recents") { schedule() }
-                }
-            } catch { if isSearch { self.error = error.localizedDescription } }
+            await refreshStatus()
             try? await Task.sleep(for: .seconds(5))
         }; statusStarted = false
+    }
+    func refreshStatus() async {
+        // The shared daemon's status describes its startup restrictions, which
+        // can outlive a permission change or a restart of the app.
+        let check = diskAccessCheck
+        let granted = await Task.detached(priority: .utility) { check() }.value
+        if fullDiskAccess != granted { fullDiskAccess = granted }
+        do {
+            let status = try await engine.request(["op": "status"])
+            let becameReady = status.ok && !ready; if ready != status.ok { ready = status.ok }
+            if status.ok {
+                if entries != status.entries ?? 0 { entries = status.entries ?? 0 }
+                if becameReady && (isSearch || route == "recents") { schedule() }
+            }
+        } catch { if isSearch { self.error = error.localizedDescription } }
     }
     func open(_ item: Hit? = nil) {
         if let item {

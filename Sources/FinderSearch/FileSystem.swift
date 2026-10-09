@@ -2,6 +2,17 @@ import Foundation
 import AppKit
 import UniformTypeIdentifiers
 
+enum FullDiskAccess {
+    static func isGranted() -> Bool {
+        // This protected file can be opened only with Full Disk Access. Opening
+        // it does not read its contents or trigger a consent prompt.
+        let url = URL(fileURLWithPath: "/Library/Application Support/com.apple.TCC/TCC.db")
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        try? handle.close()
+        return true
+    }
+}
+
 extension Hit {
     var isFolder: Bool {
         kind == "dir"

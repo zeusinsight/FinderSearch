@@ -42,7 +42,18 @@ These are **search backend timings**, not Finder’s rendered UI or FinderSearch
 end-to-end latency. The app also waits 300 ms after typing stops.
 [Method, p95 timings, raw samples, and reproduction](docs/benchmarks/README.md).
 
-## Run it
+## Download
+
+**[Download FinderSearch for Apple Silicon](https://github.com/zeusinsight/FinderSearch/releases/latest)**
+(macOS 15 or newer). Open the `.dmg`, drag FinderSearch into Applications, then
+eject the disk image and launch the app. No developer tools are required.
+
+This early release is not Developer ID-signed or notarized. If macOS blocks it,
+open **System Settings → Privacy & Security → Open Anyway** for FinderSearch.
+Grant **Full Disk Access** there to search protected folders, then quit and reopen
+the app. Let the first index build before judging search.
+
+## Build from source
 
 You'll need **macOS 15+**, **Xcode 16+ or compatible Command Line Tools**, and
 **Rust 1.85+ / Cargo**.

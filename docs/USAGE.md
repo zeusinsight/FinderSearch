@@ -10,6 +10,15 @@ It is an early prototype, with incomplete Finder parity and no OS-shell replacem
 ## Requirements
 
 - macOS 15 or newer.
+- An Apple Silicon Mac for the downloadable release.
+
+Download the `.dmg` from [GitHub Releases](https://github.com/zeusinsight/FinderSearch/releases/latest),
+drag FinderSearch into Applications, eject the image, and open the app. If macOS
+blocks it, use **System Settings → Privacy & Security → Open Anyway** for FinderSearch.
+The release is ad-hoc signed, not Developer ID-signed or notarized by Apple.
+
+Building from source additionally requires:
+
 - Xcode 16 or newer, or compatible Command Line Tools with the macOS 15 SDK.
 - Rust/Cargo with support for Rust edition 2024 (Rust 1.85 or newer).
 - Python 3 only for optional engine verification and index maintenance.
@@ -32,8 +41,16 @@ The first Rust build downloads dependencies. A separate fsearch installation
 is not required.
 
 Quit and reopen the app after rebuilding. `dist/` and build caches are generated
-locally and excluded from version control. This project does not yet provide a
-Developer ID-signed or notarized release.
+locally and excluded from version control.
+
+To build a disk image with the app, an Applications shortcut, installation
+instructions, and a SHA-256 checksum:
+
+```sh
+./scripts/package-dmg.sh
+```
+
+The image is written to `dist/` and labeled with the build architecture.
 
 ## Permissions and indexing
 
@@ -128,7 +145,7 @@ No Finder extensions, AirDrop integration, disclosure rows, advanced grouping,
 batch rename, smart folders, cloud-management UI, or persistent session/undo state.
 Column ancestors remain snapshots until revisited. New Folder/Rename use dialogs
 rather than inline editing. Clipboard/drop conflicts have no merge/overwrite dialog.
-Full keyboard/multi-drag parity and public release packaging remain in progress.
+Full keyboard/multi-drag parity remains in progress.
 
 ## Credits
 

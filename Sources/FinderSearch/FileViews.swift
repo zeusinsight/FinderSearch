@@ -20,37 +20,59 @@ struct FileIcon: View {
     var body: some View {
         Image(nsImage: image ?? FileIcons.shared.placeholder(hit, size: .row)).resizable()
             .task(id: hit.imageKey) {
+                image = nil
                 guard hit.metadataPending != true else { return }
                 guard let loaded = await FileIcons.shared.load(hit, size: .row) else { return }
                 guard !Task.isCancelled else { return }
                 image = loaded
             }
+            .onDisappear { image = nil }
     }
 }
 
 @MainActor final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let images = NSCache<NSString, NSImage>()
-    private init() { images.countLimit = 768; images.totalCostLimit = 160 * 1024 * 1024 }
-    func key(_ hit: Hit) -> String { hit.path + ":" + String(hit.mtime) + ":" + String(hit.size) }
-    func image(_ hit: Hit) -> NSImage? { images.object(forKey: key(hit) as NSString) }
-    func store(_ image: NSImage, for hit: Hit) {
-        images.setObject(image, forKey: key(hit) as NSString, cost: ImageRasterizer.cost(image))
+    private init() { images.countLimit = 768; images.totalCostLimit = 48 * 1024 * 1024 }
+    func key(_ hit: Hit, pixels: Int) -> String {
+        hit.imageKey + ":" + String(hit.size) + ":" + String(pixels)
+    }
+    func image(_ hit: Hit, pixels: Int) -> NSImage? {
+        images.object(forKey: key(hit, pixels: pixels) as NSString)
+    }
+    func store(_ image: NSImage, for hit: Hit, pixels: Int) {
+        images.setObject(
+            image, forKey: key(hit, pixels: pixels) as NSString,
+            cost: ImageRasterizer.cost(image))
+    }
+}
+
+enum ThumbnailSizing {
+    // Preserve the existing maximum resolution while avoiding oversized filmstrip images.
+    static func pixels(points: Double, scale: Double) -> Int {
+        Int(min(256, max(1, ceil(points * scale))))
     }
 }
 
 struct FileThumbnail: View {
     let hit: Hit
     let size: Double
+    @Environment(\.displayScale) private var displayScale
     @State private var image: NSImage?
+    private var pixels: Int { ThumbnailSizing.pixels(points: size, scale: displayScale) }
+    private var iconSize: FileIconSize { pixels <= 128 ? .compact : .preview }
     var body: some View {
         Image(
-            nsImage: image ?? ThumbnailCache.shared.image(hit) ?? FileIcons.shared.placeholder(hit)
+            nsImage: image ?? FileIcons.shared.placeholder(hit, size: iconSize)
         ).resizable().scaledToFit().frame(width: size, height: size)
-            .task(id: hit.imageKey) {
+            .task(id: ThumbnailCache.shared.key(hit, pixels: pixels)) {
+                image = nil
                 guard hit.metadataPending != true else { return }
-                if let cached = ThumbnailCache.shared.image(hit) { image = cached; return }
-                guard let icon = await FileIcons.shared.load(hit) else { return }
+                let pixels = pixels
+                if let cached = ThumbnailCache.shared.image(hit, pixels: pixels) {
+                    image = cached; return
+                }
+                guard let icon = await FileIcons.shared.load(hit, size: iconSize) else { return }
                 guard !Task.isCancelled else { return }; image = icon
                 guard hit.kind != "dir" else { return }
                 // Cells flung past during fast scrolling disappear before this
@@ -66,7 +88,7 @@ struct FileThumbnail: View {
                 }.value
                 guard !Task.isCancelled, !unavailableCloudFile else { return }
                 let request = QLThumbnailGenerator.Request(
-                    fileAt: hit.url, size: CGSize(width: 128, height: 128), scale: 2,
+                    fileAt: hit.url, size: CGSize(width: pixels, height: pixels), scale: 1,
                     representationTypes: .thumbnail)
                 let completion = ThumbnailCompletion(request: request)
                 let thumbnail: NSImage? = await withTaskCancellationHandler {
@@ -77,12 +99,12 @@ struct FileThumbnail: View {
                             // Decode on Quick Look's queue rather than at first draw.
                             completion.finish(
                                 result.flatMap {
-                                    ImageRasterizer.decode($0.cgImage, maxPixels: 256)
+                                    ImageRasterizer.decode($0.cgImage, maxPixels: pixels)
                                 }
                                 .map {
                                     NSImage(
                                         cgImage: $0,
-                                        size: ImageRasterizer.aspectSize($0, points: 128))
+                                        size: ImageRasterizer.aspectSize($0, points: size))
                                 })
                         }
                         // Cancellation can race the call that starts generation.
@@ -93,10 +115,12 @@ struct FileThumbnail: View {
                     Task { @MainActor in completion.cancelGeneration() }
                 }
                 if let thumbnail {
-                    ThumbnailCache.shared.store(thumbnail, for: hit);
-                    guard !Task.isCancelled else { return }; image = thumbnail
+                    guard !Task.isCancelled else { return }
+                    ThumbnailCache.shared.store(thumbnail, for: hit, pixels: pixels)
+                    image = thumbnail
                 }
             }
+            .onDisappear { image = nil }
     }
 }
 

@@ -417,6 +417,7 @@ enum FileOrdering {
 /// Pixel sizes for 16-point rows and large previews on Retina displays.
 enum FileIconSize: Int, Sendable {
     case row = 32
+    case compact = 128
     case preview = 256
 }
 
@@ -427,7 +428,7 @@ final class FileIcons: @unchecked Sendable {
         let queue = OperationQueue(); queue.name = "FinderSearch.icons";
         queue.qualityOfService = .utility; queue.maxConcurrentOperationCount = 4; return queue
     }()
-    private init() { cache.countLimit = 1024; cache.totalCostLimit = 96 * 1024 * 1024 }
+    private init() { cache.countLimit = 1024; cache.totalCostLimit = 16 * 1024 * 1024 }
     private final class Request: @unchecked Sendable {
         private let lock = NSLock()
         private var cancelled = false

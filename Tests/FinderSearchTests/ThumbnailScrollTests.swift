@@ -5,6 +5,42 @@ import SwiftUI
 @testable import FinderSearch
 
 final class ThumbnailScrollTests: XCTestCase {
+    @MainActor func testThumbnailResolutionsStaySeparateAndReduceBitmapCost() throws {
+        let hit = Hit(
+            path: "/fixture/\(UUID().uuidString).png", kind: "file",
+            size: 1, mtime: 1, score: 0)
+        let source = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 640, height: 480, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage())
+        let compactPixels = ThumbnailSizing.pixels(points: 64, scale: 2)
+        let largePixels = ThumbnailSizing.pixels(points: 128, scale: 2)
+        XCTAssertEqual(compactPixels, 128)
+        XCTAssertEqual(ThumbnailSizing.pixels(points: 64, scale: 1), 64)
+        XCTAssertEqual(ThumbnailSizing.pixels(points: 500, scale: 2), 256)
+        let small = NSImage(
+            cgImage: try XCTUnwrap(
+                ImageRasterizer.decode(
+                    source, maxPixels: compactPixels)), size: NSSize(width: 64, height: 48))
+        let large = NSImage(
+            cgImage: try XCTUnwrap(
+                ImageRasterizer.decode(
+                    source, maxPixels: largePixels)), size: NSSize(width: 128, height: 96))
+        XCTAssertEqual(ImageRasterizer.cost(small) * 4, ImageRasterizer.cost(large))
+        let cache = ThumbnailCache.shared
+        cache.store(small, for: hit, pixels: compactPixels)
+        XCTAssertNil(
+            cache.image(hit, pixels: largePixels),
+            "A filmstrip bitmap cannot satisfy a larger preview")
+        cache.store(large, for: hit, pixels: largePixels)
+        XCTAssertTrue(cache.image(hit, pixels: compactPixels) === small)
+        XCTAssertTrue(cache.image(hit, pixels: largePixels) === large)
+        var pending = hit
+        pending.metadataPending = true
+        XCTAssertNil(cache.image(pending, pixels: compactPixels))
+    }
+
     private func makeImageFixtures(_ count: Int) throws -> (URL, [Hit]) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FinderSearch-thumbs-\(UUID().uuidString)")

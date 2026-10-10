@@ -95,9 +95,20 @@ opening or previewing a cloud file may trigger a provider download.
 - **Search:** Command-F; requests begin 50 ms after typing stops; Return submits a pending search immediately. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
-- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
-  yet support content-query syntax. Footer timing measures engine work, excluding
-  debounce, IPC, and rendering.
+- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. Footer timing
+  measures engine work, excluding debounce, IPC, and rendering.
+- **Content search:** Option-Command-F (or the Contents segment in the bar below the
+  toolbar, while a search is active) searches inside text files — code, Markdown, and
+  plain text — and lists each file with the matching line numbers and lines. Choose
+  plain text (case-insensitive unless the phrase contains a capital letter), a regular
+  expression, or the definition of a symbol (always case-sensitive). Folder scope and
+  the Kind picker apply as for filename search; typed filename filters such as `ext:pdf`
+  do not, and Kind ▸ Folder has no contents to match, so it resets to Any Kind. The
+  content index covers the home folder apart from skipped trees such as `node_modules`,
+  `vendor`, and `build`; a scope inside those, or outside the home folder, reads
+  candidate files directly and can return partial results within the search budget. The
+  status bar reports whether the content index answered, whether the budget cut the
+  search short, and how many text files are still waiting to be indexed.
 - **Select and preview:** click, Command-click, or Shift-click; double-click or
   Command-O opens, Space/Command-Y uses Quick Look, and Return renames.
   In Quick Look, arrow keys browse the current selection (or visible files); Space closes it.
@@ -159,8 +170,9 @@ Leaving a view cancels pending
 icon work and Quick Look thumbnail requests. Column folders open on the first
 selection without waiting for a possible double-click.
 Folder-event bursts are coalesced, and obsolete enumeration is cancelled cooperatively.
-Engine cancellation releases the stdio client; it does not interrupt daemon computation
-or a blocked filesystem call. Cold folders and slow volumes can still take time.
+Engine cancellation keeps the helper warm and discards its abandoned reply; it does not
+interrupt daemon computation or a blocked filesystem call. Cold folders and slow volumes
+can still take time.
 
 ## Validation and contributions
 

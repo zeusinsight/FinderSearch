@@ -17,7 +17,8 @@ preview files, and manage your files in a familiar macOS interface.
 ## Features
 
 - **Find files quickly.** Fuzzy matching, relevance ranking, folder scope, and
-  filters like `ext:pdf` and `mtime:<7d`.
+  filters like `ext:pdf` and `mtime:<7d`. Search inside text files too, with the
+  matching line numbers (⌥⌘F).
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,

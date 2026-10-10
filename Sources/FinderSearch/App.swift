@@ -99,6 +99,12 @@ import UniformTypeIdentifiers
                 Button("Search") {
                     NotificationCenter.default.post(name: .focusSearch, object: nil)
                 }.keyboardShortcut("f")
+                Button(
+                    model?.contentSearch == true ? "Search File Names" : "Search File Contents"
+                ) {
+                    if let model { model.contentSearch.toggle() }
+                    NotificationCenter.default.post(name: .focusSearch, object: nil)
+                }.keyboardShortcut("f", modifiers: [.command, .option])
             }
         }
     }
@@ -164,7 +170,10 @@ struct BrowserView: View {
                     .contentShape(Rectangle())
                     .contextMenu { backgroundActions }
                     .modifier(SafeBackgroundDropTarget(model: model))
-                    .focusable(model.viewMode == .icons || model.viewMode == .gallery)
+                    .focusable(
+                        model.contentActive || model.viewMode == .icons
+                            || model.viewMode == .gallery
+                    )
                     .focused($keyboardFocus, equals: .files).focusEffectDisabled()
                 pathBar
                 statusBar
@@ -186,7 +195,8 @@ struct BrowserView: View {
                     }
                 }
                 ToolbarItem {
-                    ViewModePicker(selection: $model.viewMode).frame(width: 150, height: 28)
+                    ViewModePicker(selection: $model.viewMode, isEnabled: !model.contentActive)
+                        .frame(width: 150, height: 28)
                 }
                 ToolbarItem {
                     Menu {
@@ -300,10 +310,12 @@ struct BrowserView: View {
                 if event.keyCode == 36 { model.rename(); return nil }
                 if event.keyCode == 53 { model.selection = []; return nil }
                 if (model.viewMode == .icons || model.viewMode == .gallery
-                    || (model.viewMode == .columns && [125, 126].contains(event.keyCode))),
+                    || (model.viewMode == .columns && [125, 126].contains(event.keyCode))
+                    || model.contentActive),
                     [123, 124, 125, 126].contains(event.keyCode)
                 {
-                    let stride = model.viewMode == .icons ? gridColumns : 1
+                    let stride =
+                        (model.viewMode == .icons && !model.contentActive) ? gridColumns : 1
                     let delta =
                         event.keyCode == 123
                         ? -1
@@ -327,6 +339,11 @@ struct BrowserView: View {
             Button(model.location.lastPathComponent) { model.scope = model.location.path }
                 .buttonStyle(.bordered).tint(model.scope.isEmpty ? .secondary : .accentColor)
             Spacer()
+            Picker("Find", selection: $model.contentSearch) {
+                Text("Names").tag(false)
+                Text("Contents").tag(true)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+            .help("Search filenames or the contents of text files")
             Picker("Kind", selection: $model.fileType) {
                 Text("Any Kind").tag(""); Text("Folder").tag("dir"); Text("Document").tag("doc");
                 Text("Image").tag("image"); Text("Movie").tag("video"); Text("Audio").tag("audio")
@@ -335,7 +352,9 @@ struct BrowserView: View {
             Color(nsColor: .controlBackgroundColor))
     }
     @ViewBuilder private var fileContent: some View {
-        if model.viewMode == .columns && model.canWriteHere {
+        if model.contentActive {
+            ContentResultsView(model: model, select: select)
+        } else if model.viewMode == .columns && model.canWriteHere {
             ColumnBrowser(model: model, focusFiles: { focusFiles() }, rowMenu: rowActions).id(
                 model.id)
         } else if (model.loading || model.searching) && model.sortedHits.isEmpty {
@@ -449,6 +468,24 @@ struct BrowserView: View {
             }
         }.background(Color(nsColor: .windowBackgroundColor))
     }
+    private var statusCount: String {
+        let shown = model.sortedHits.count
+        if !model.selection.isEmpty { return "\(model.selection.count) selected" }
+        if model.isSearch && model.hits.count == 500 { return "First 500 matches" }
+        return model.contentActive ? "\(shown) files" : "\(shown) items"
+    }
+    @ViewBuilder private var contentStatus: some View {
+        Text("· \(model.contentSource == "scan" ? "read from disk" : "index")")
+            .foregroundStyle(.secondary)
+        if !model.contentComplete {
+            Image(systemName: "clock.arrow.circlepath")
+                .help("Partial results: the search budget ran out. Narrow the search for complete results.")
+        }
+        if model.contentIndexing > 0 {
+            Text("· indexing \(model.contentIndexing) files")
+                .help("The content index is still building; some text files are not searchable yet.")
+        }
+    }
     private var statusBar: some View {
         HStack {
             if model.loading || model.searching || model.sorting || model.busy {
@@ -467,15 +504,12 @@ struct BrowserView: View {
                 }
                 Button("Cancel") { model.cancelOperation() }.controlSize(.small)
             } else {
-                Text(
-                    model.selection.isEmpty
-                        ? (model.isSearch && model.hits.count == 500
-                            ? "First 500 matches" : "\(model.sortedHits.count) items")
-                        : "\(model.selection.count) selected")
+                Text(statusCount)
             }
             if model.isSearch { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
+            if model.contentActive { contentStatus }
             Spacer()
-            if model.viewMode == .icons {
+            if model.viewMode == .icons && !model.contentActive {
                 Image(systemName: "square").font(.system(size: 8));
                 Slider(value: $iconSize, in: 40...96).frame(width: 100).accessibilityLabel(
                     "Icon Size");
@@ -578,7 +612,9 @@ struct BrowserView: View {
         if NSApp.keyWindow?.firstResponder is NSTextView {
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
-        if model.viewMode == .icons || model.viewMode == .gallery { keyboardFocus = .files }
+        if model.contentActive || model.viewMode == .icons || model.viewMode == .gallery {
+            keyboardFocus = .files
+        }
     }
     private func select(_ hit: Hit) {
         guard model.renaming?.path != hit.path else { return }

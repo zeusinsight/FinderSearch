@@ -4,6 +4,7 @@ import AppKit
 /// Keep toolbar segments and symbol images stable while folder content changes.
 struct ViewModePicker: NSViewRepresentable {
     @Binding var selection: FileViewMode
+    var isEnabled = true
     private static let width: CGFloat = 150
     private static let height: CGFloat = 28
 
@@ -23,6 +24,7 @@ struct ViewModePicker: NSViewRepresentable {
         control.segmentStyle = .automatic
         control.target = coordinator
         control.action = #selector(Coordinator.selectMode(_:))
+        control.isEnabled = isEnabled
         control.setAccessibilityLabel("View")
         control.setContentHuggingPriority(.required, for: .horizontal)
         control.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -41,6 +43,7 @@ struct ViewModePicker: NSViewRepresentable {
 
     func updateNSView(_ control: NSSegmentedControl, context: Context) {
         context.coordinator.selection = $selection
+        control.isEnabled = isEnabled
         context.coordinator.update(control)
     }
 

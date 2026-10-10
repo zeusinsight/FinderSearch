@@ -95,9 +95,10 @@ opening or previewing a cloud file may trigger a provider download.
 - **Search:** Command-F; requests begin 50 ms after typing stops; Return submits a pending search immediately. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
-- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
-  yet support content-query syntax. Footer timing measures engine work, excluding
-  debounce, IPC, and rendering.
+- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. Footer timing
+  measures engine work, excluding debounce, IPC, and rendering.
+  Clearing the search box clears the search scope and restores the browsing view;
+  Relevance is offered in Sort only while a search is active.
 - **Select and preview:** click, Command-click, or Shift-click; double-click or
   Command-O opens, Space/Command-Y uses Quick Look, and Return renames.
   In Quick Look, arrow keys browse the current selection (or visible files); Space closes it.

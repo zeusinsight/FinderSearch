@@ -214,6 +214,12 @@ import AppKit
             guard !updating, let table else { return }
             parent.model.cancelRename()
             parent.focusFiles(); table.window?.makeFirstResponder(table)
+            // Quick Look, Get Info, and Rename act on the focused item: track
+            // the last row the user clicked instead of falling back to
+            // whichever selected item sorts first.
+            if table.clickedRow >= 0, items.indices.contains(table.clickedRow) {
+                parent.model.focusedPath = items[table.clickedRow].path
+            }
             parent.model.selection = Set(
                 table.selectedRowIndexes.compactMap {
                     items.indices.contains($0) ? items[$0].path : nil

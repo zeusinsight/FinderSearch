@@ -31,6 +31,7 @@ import AppKit
             table.addTableColumn(column)
         }
         table.target = coordinator; table.doubleAction = #selector(Coordinator.openClicked)
+        table.dragExit = { [weak model = model] in model?.springLoader.cancel() }
         table.menuProvider = { [weak coordinator = coordinator] row in coordinator?.menu(for: row) }
         table.registerForDraggedTypes([.fileURL])
         table.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
@@ -39,6 +40,21 @@ import AppKit
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true; scroll.drawsBackground = true; scroll.documentView = table
         coordinator.table = table
+        let marquee = table.marquee
+        marquee.frame = table.bounds
+        marquee.autoresizingMask = [.width, .height]
+        marquee.table = table
+        marquee.pathForRow = { [weak coordinator] row in
+            guard let coordinator, coordinator.items.indices.contains(row) else { return nil }
+            return coordinator.items[row].path
+        }
+        table.addSubview(marquee)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        coordinator.scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
+        ) { [weak coordinator] _ in
+            MainActor.assumeIsolated { coordinator?.rememberScroll() }
+        }
         return scroll
     }
     func updateNSView(_ view: NSScrollView, context: Context) {
@@ -49,23 +65,38 @@ import AppKit
     @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var parent: FileList
         weak var table: BrowserTable?
-        private var items: [Hit] = []
+        fileprivate var items: [Hit] = []
         private var rowByPath: [String: Int] = [:]
         private var updating = false
         private weak var renameField: RenameTextField?
         private var actions: [Int: @MainActor () -> Void] = [:]
+        var scrollObserver: NSObjectProtocol?
+        private var restoredRoute: String?
+        private var displayedTab: UUID?
         init(_ parent: FileList) { self.parent = parent }
         func update() {
             guard let table else { return }
+            table.marquee.configure(
+                model: parent.model, identity: parent.model.route + ":" + parent.model.query)
+            table.marquee.focusFiles = parent.focusFiles
+            let switchingTab = displayedTab != parent.model.id
+            if switchingTab {
+                renameField?.cancelEditing(); renameField = nil
+                displayedTab = parent.model.id; restoredRoute = nil
+            }
             if let hit = parent.model.renaming, let row = rowByPath[hit.path] {
+                updating = true; defer { updating = false }
+                table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                 // Do not rebuild a live field editor when metadata or sorting
                 // finishes; its draft and selection belong to the user.
                 table.scrollRowToVisible(row)
                 if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? FileCell,
-                    let field = cell.textField as? RenameTextField {
+                    let field = cell.textField as? RenameTextField
+                {
                     let model = parent.model
                     renameField = field
-                    field.begin(hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+                    field.begin(
+                        hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
                 }
                 return
             }
@@ -96,6 +127,45 @@ import AppKit
             let descriptors =
                 key.map { [NSSortDescriptor(key: $0, ascending: parent.model.ascending)] } ?? []
             if table.sortDescriptors != descriptors { table.sortDescriptors = descriptors }
+            if restoredRoute != parent.model.route,
+                let anchor = parent.model.scrollAnchor, let row = rowByPath[anchor],
+                let scroll = table.enclosingScrollView
+            {
+                let y = table.rect(ofRow: row).minY + parent.model.scrollOffset
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                restoredRoute = parent.model.route
+            } else if parent.model.scrollAnchor == nil {
+                if switchingTab, let scroll = table.enclosingScrollView {
+                    scroll.contentView.scroll(to: .zero)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                restoredRoute = parent.model.route
+            }
+            if let hit = parent.model.renaming, let row = rowByPath[hit.path],
+                let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? FileCell,
+                let field = cell.textField as? RenameTextField
+            {
+                table.scrollRowToVisible(row)
+                renameField = field
+                let model = parent.model
+                field.begin(
+                    hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+            }
+        }
+        func rememberScroll() {
+            guard !updating, let table, let clip = table.enclosingScrollView?.contentView,
+                !parent.model.loading
+            else { return }
+            let row = table.row(at: NSPoint(x: 1, y: clip.bounds.minY + 1))
+            guard items.indices.contains(row) else { return }
+            parent.model.scrollOffset = max(0, clip.bounds.minY - table.rect(ofRow: row).minY)
+            if parent.model.scrollAnchor != items[row].path {
+                parent.model.scrollAnchor = items[row].path
+            }
+        }
+        deinit {
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
         }
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int)
@@ -110,7 +180,8 @@ import AppKit
             switch key {
             case "name": cell.textField?.stringValue = hit.name
             case "modified":
-                cell.textField?.stringValue = hit.metadataPending == true
+                cell.textField?.stringValue =
+                    hit.metadataPending == true
                     ? "—" : Self.dateFormatter.string(from: hit.modified)
             case "size":
                 cell.textField?.stringValue =
@@ -122,11 +193,11 @@ import AppKit
             cell.textField?.textColor = key == "name" ? .labelColor : .secondaryLabelColor
             cell.textField?.alignment = key == "size" ? .right : .left
             if key == "name" {
-                cell.imageView?.image = FileIcons.shared.placeholder(hit)
+                cell.imageView?.image = FileIcons.shared.placeholder(hit, size: .row)
                 cell.iconTask?.cancel()
                 guard hit.metadataPending != true else { cell.iconTask = nil; return cell }
                 cell.iconTask = Task { @MainActor [weak cell] in
-                    guard let icon = await FileIcons.shared.load(hit) else { return }
+                    guard let icon = await FileIcons.shared.load(hit, size: .row) else { return }
                     guard !Task.isCancelled, let cell, cell.path == hit.path else { return }
                     cell.imageView?.image = icon
                 }
@@ -171,7 +242,10 @@ import AppKit
             _ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
             proposedDropOperation operation: NSTableView.DropOperation
         ) -> NSDragOperation {
-            guard !parent.model.busy else { return [] }
+            guard !parent.model.busy else { parent.model.springLoader.cancel(); return [] }
+            parent.model.hoverFolder(
+                operation == .on && items.indices.contains(row) && items[row].isFolder
+                    ? items[row].url : nil)
             if operation == .on {
                 guard items.indices.contains(row), items[row].isFolder else { return [] }
             } else {
@@ -185,6 +259,7 @@ import AppKit
             _ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
             dropOperation operation: NSTableView.DropOperation
         ) -> Bool {
+            parent.model.springLoader.cancel()
             let destination: URL
             if operation == .on && items.indices.contains(row) && items[row].isFolder {
                 destination = items[row].url
@@ -250,6 +325,18 @@ import AppKit
             }
             let hit = items[row]
             add("Open") { model.open(hit) }
+            if !hit.isFolder {
+                let applications = NSMenu(); applications.autoenablesItems = false
+                for application in OpenWithApps.applications(for: hit) {
+                    add(OpenWithApps.title(application, for: hit), to: applications) {
+                        model.openWith(application, hit: hit)
+                    }
+                }
+                applications.addItem(.separator())
+                add("Other…", to: applications) { model.chooseApplication(for: hit) }
+                let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+                item.submenu = applications; menu.addItem(item)
+            }
             add("Open in New Tab", enabled: hit.isFolder) { [weak self] in
                 self?.parent.newTab(hit.url)
             }
@@ -257,7 +344,10 @@ import AppKit
             add("Open Enclosing Folder") { model.navigate(hit.url.deletingLastPathComponent()) }
             menu.addItem(.separator())
             add("Get Info") { model.info() }
-            add("Rename…", enabled: model.selection.count == 1 && !model.busy) { model.rename() }
+            add("Rename…", enabled: !model.busy) { model.renameItems() }
+            add("Compress", enabled: !model.busy && model.canWriteHere) { model.compress() }
+            add("Extract ZIP", enabled: !model.busy && hit.url.pathExtension.lowercased() == "zip")
+            { model.extract() }
             add("Duplicate", enabled: !model.busy) { model.duplicate() }
             add("Copy") { model.copy() }
             add("Copy Path") { model.copyPath() }
@@ -278,7 +368,15 @@ import AppKit
 }
 
 @MainActor final class BrowserTable: NSTableView {
+    let marquee = MarqueeSelectionView()
     var menuProvider: ((Int) -> NSMenu?)?
+    var dragExit: (() -> Void)?
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        dragExit?(); super.draggingExited(sender)
+    }
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        dragExit?(); super.draggingEnded(sender)
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         return menuProvider?(row(at: point))

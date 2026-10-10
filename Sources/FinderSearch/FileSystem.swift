@@ -24,12 +24,13 @@ extension Hit {
         return UTType(filenameExtension: url.pathExtension)?.localizedDescription ?? "Document"
     }
     var modified: Date { Date(timeIntervalSince1970: Double(mtime)) }
-    static func read(_ url: URL) throws -> Hit {
+    static func read(_ url: URL, parent: URL? = nil) throws -> Hit {
         let v = try url.resourceValues(forKeys: [
             .isDirectoryKey, .fileSizeKey, .contentModificationDateKey,
         ])
         return Hit(
-            path: url.path, kind: v.isDirectory == true ? "dir" : "file",
+            path: (parent?.appendingPathComponent(url.lastPathComponent) ?? url).path,
+            kind: v.isDirectory == true ? "dir" : "file",
             size: UInt64(max(0, v.fileSize ?? 0)),
             mtime: UInt64(
                 max(0, (v.contentModificationDate ?? .distantPast).timeIntervalSince1970)), score: 0
@@ -39,11 +40,15 @@ extension Hit {
 
 enum FileMutation: Equatable {
     case copy(URL, URL), move(URL, URL), trash(URL), folder(URL), textFile(URL), tags(URL, [String])
+    case replace(URL, URL, move: Bool)
+    case compress([URL], URL), extract(URL, URL)
+    case renameBatch([RenameMove])
 }
 struct FileBatch {
     var inverse: [FileMutation] = []
     var errors: [String] = []
     var failed: [FileMutation] = []
+    var cancelled = false
 }
 
 enum OptimisticFiles {
@@ -51,6 +56,20 @@ enum OptimisticFiles {
         var result = hits
         for operation in operations {
             switch operation {
+            case .renameBatch(let moves):
+                let mapping = Dictionary(
+                    uniqueKeysWithValues: moves.map { ($0.source.path, $0.destination) })
+                result = result.map { hit in
+                    guard let destination = mapping[hit.path] else { return hit }
+                    return Hit(
+                        path: destination.path, kind: hit.kind, size: hit.size,
+                        mtime: hit.mtime, score: hit.score, metadataPending: hit.metadataPending)
+                }
+            case .replace(let source, let destination, let move):
+                result.removeAll { $0.path == destination.path }
+                result = applying(
+                    [move ? .move(source, destination) : .copy(source, destination)], to: result,
+                    in: folder)
             case .trash(let source):
                 result.removeAll { $0.path == source.path }
             case .move(let source, let destination):
@@ -61,32 +80,42 @@ enum OptimisticFiles {
                 result.removeAll { $0.path == source.path }
                 if let original,
                     destination.deletingLastPathComponent().path == folder?.path
-                        || (folder == nil && destination.deletingLastPathComponent().path
-                            == source.deletingLastPathComponent().path)
+                        || (folder == nil
+                            && destination.deletingLastPathComponent().path
+                                == source.deletingLastPathComponent().path)
                 {
-                    result.append(Hit(path: destination.path, kind: original.kind,
-                        size: original.size, mtime: original.mtime, score: original.score,
-                        metadataPending: original.metadataPending))
+                    result.append(
+                        Hit(
+                            path: destination.path, kind: original.kind,
+                            size: original.size, mtime: original.mtime, score: original.score,
+                            metadataPending: original.metadataPending))
                 }
             case .copy(let source, let destination):
                 guard destination.deletingLastPathComponent().path == folder?.path,
                     !result.contains(where: { $0.path == destination.path }),
                     let original = result.first(where: { $0.path == source.path })
                 else { continue }
-                result.append(Hit(path: destination.path, kind: original.kind,
-                    size: original.size, mtime: original.mtime, score: original.score,
-                    metadataPending: original.metadataPending))
-            case .folder(let destination):
+                result.append(
+                    Hit(
+                        path: destination.path, kind: original.kind,
+                        size: original.size, mtime: original.mtime, score: original.score,
+                        metadataPending: original.metadataPending))
+            case .folder(let destination), .extract(_, let destination):
                 guard destination.deletingLastPathComponent().path == folder?.path,
                     !result.contains(where: { $0.path == destination.path })
                 else { continue }
-                result.append(Hit(path: destination.path, kind: "dir", size: 0,
-                    mtime: UInt64(Date().timeIntervalSince1970), score: 0))
-            case .textFile(let destination):
+                result.append(
+                    Hit(
+                        path: destination.path, kind: "dir", size: 0,
+                        mtime: UInt64(Date().timeIntervalSince1970), score: 0))
+            case .textFile(let destination), .compress(_, let destination):
                 guard destination.deletingLastPathComponent().path == folder?.path,
-                    !result.contains(where: { $0.path == destination.path }) else { continue }
-                result.append(Hit(path: destination.path, kind: "file", size: 0,
-                    mtime: UInt64(Date().timeIntervalSince1970), score: 0))
+                    !result.contains(where: { $0.path == destination.path })
+                else { continue }
+                result.append(
+                    Hit(
+                        path: destination.path, kind: "file", size: 0,
+                        mtime: UInt64(Date().timeIntervalSince1970), score: 0))
             case .tags: break
             }
         }
@@ -100,11 +129,16 @@ enum OptimisticFiles {
         let visible = Set(visibleHits.map(\.path))
         for operation in operations {
             switch operation {
-            case .move(let source, let destination):
+            case .move(let source, let destination),
+                .replace(let source, let destination, move: true):
                 guard !visible.contains(source.path) else { continue }
                 if result.remove(source.path) != nil && visible.contains(destination.path) {
                     result.insert(destination.path)
                 }
+            case .renameBatch(let moves):
+                let mapping = Dictionary(
+                    uniqueKeysWithValues: moves.map { ($0.source.path, $0.destination.path) })
+                result = Set(result.map { mapping[$0] ?? $0 })
             case .trash(let source): result.remove(source.path)
             default: break
             }
@@ -131,7 +165,8 @@ enum LocalFiles {
                     break
                 }
                 let name = withUnsafePointer(to: &entry.pointee.d_name) {
-                    $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1)
+                    {
                         String(cString: $0)
                     }
                 }
@@ -143,8 +178,10 @@ enum LocalFiles {
                 default: kind = "pending"
                 }
                 let path = folder.path + (folder.path == "/" ? "" : "/") + name
-                hits.append(Hit(path: path, kind: kind, size: 0, mtime: 0, score: 0,
-                    metadataPending: true))
+                hits.append(
+                    Hit(
+                        path: path, kind: kind, size: 0, mtime: 0, score: 0,
+                        metadataPending: true))
             }
             return hits
         }
@@ -155,18 +192,26 @@ enum LocalFiles {
     }
     static func list(_ folder: URL, hidden: Bool) throws -> [Hit] {
         let urls = try FileManager.default.contentsOfDirectory(
-            at: folder,
+            at: folder.resolvingSymlinksInPath(),
             includingPropertiesForKeys: [
                 .isDirectoryKey, .fileSizeKey, .contentModificationDateKey,
             ], options: hidden ? [] : [.skipsHiddenFiles])
         var hits: [Hit] = []; hits.reserveCapacity(urls.count)
         for url in urls {
             try Task.checkCancellation()
-            if let hit = try? Hit.read(url) { hits.append(hit) }
+            // FileManager resolves parent aliases (including /var → /private/var).
+            // Keep identities aligned with preview and optimistic mutation paths.
+            if let hit = try? Hit.read(url, parent: folder) { hits.append(hit) }
         }
         return hits
     }
-    static func availableName(in folder: URL, name: String, suffix: String = "") -> URL {
+    static func exists(_ url: URL) -> Bool {
+        var info = stat()
+        return url.path.withCString { lstat($0, &info) == 0 }
+    }
+    static func availableName(
+        in folder: URL, name: String, suffix: String = "", reserved: Set<String> = []
+    ) -> URL {
         let original = URL(fileURLWithPath: name)
         let ext = original.pathExtension
         let base = original.deletingPathExtension().lastPathComponent
@@ -176,19 +221,78 @@ enum LocalFiles {
             let tail = suffix + (i == 0 ? "" : " \(i + 1)")
             let candidate = folder.appendingPathComponent(
                 base + tail + (ext.isEmpty ? "" : "." + ext))
-            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            if !exists(candidate), !reserved.contains(candidate.path) { return candidate }
             i += 1
         }
     }
     /// Never overwrite. Successful mutations retain inverses even if another item fails.
-    static func apply(_ operations: [FileMutation]) -> FileBatch {
+    static func apply(_ operations: [FileMutation], control: FileOperationControl? = nil)
+        -> FileBatch
+    {
         var batch = FileBatch()
-        for op in operations {
+        for (index, op) in operations.enumerated() {
+            if control?.isCancelled == true {
+                batch.cancelled = true; batch.failed.append(contentsOf: operations[index...]); break
+            }
+            let source: URL?
+            switch op {
+            case .copy(let url, _), .move(let url, _), .trash(let url), .extract(let url, _),
+                .replace(let url, _, _):
+                source = url
+            case .compress(let urls, _): source = urls.first
+            default: source = nil
+            }
+            let size = source.flatMap {
+                try? $0.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            }
+            control?.start(
+                item: source?.lastPathComponent ?? "Creating item…", completed: index,
+                total: operations.count,
+                expectedBytes: size?.isRegularFile == true ? Int64(size?.fileSize ?? 0) : 0)
             do {
+                if case .renameBatch(let moves) = op {
+                    let renamed = BatchRenames.apply(
+                        moves, control: control ?? FileOperationControl())
+                    batch.inverse.insert(contentsOf: renamed.inverse, at: 0)
+                    batch.errors.append(contentsOf: renamed.errors);
+                    batch.failed.append(contentsOf: renamed.failed)
+                    if renamed.cancelled {
+                        batch.cancelled = true;
+                        batch.failed.append(contentsOf: operations.dropFirst(index + 1)); break
+                    }
+                    continue
+                }
+                if case .replace(let source, let destination, let move) = op {
+                    let old = apply([.trash(destination)])
+                    guard old.errors.isEmpty, let restore = old.inverse.first else {
+                        batch.errors.append(contentsOf: old.errors); batch.failed.append(op);
+                        continue
+                    }
+                    let replacement = apply(
+                        [move ? .move(source, destination) : .copy(source, destination)],
+                        control: control)
+                    if replacement.failed.isEmpty {
+                        batch.inverse.insert(contentsOf: replacement.inverse + [restore], at: 0)
+                    } else {
+                        let recovered = apply([restore])
+                        if !recovered.errors.isEmpty { batch.inverse.insert(restore, at: 0) }
+                        batch.errors.append(contentsOf: replacement.errors + recovered.errors)
+                        batch.failed.append(op)
+                        if replacement.cancelled {
+                            batch.cancelled = true
+                            batch.failed.append(contentsOf: operations.dropFirst(index + 1)); break
+                        }
+                    }
+                    continue
+                }
                 let inverse: FileMutation
                 switch op {
                 case .copy(let source, let destination):
-                    try FileManager.default.copyItem(at: source, to: destination)
+                    if let control {
+                        try NativeFileCopy.copy(source, to: destination, control: control)
+                    } else {
+                        try FileManager.default.copyItem(at: source, to: destination)
+                    }
                     inverse = .trash(destination)
                 case .move(let source, let destination):
                     guard source.standardizedFileURL != destination.standardizedFileURL else {
@@ -202,7 +306,11 @@ enum LocalFiles {
                                     "An item named ‘\(destination.lastPathComponent)’ already exists."
                             ])
                     }
-                    try FileManager.default.moveItem(at: source, to: destination)
+                    if let control {
+                        try NativeFileCopy.move(source, to: destination, control: control)
+                    } else {
+                        try FileManager.default.moveItem(at: source, to: destination)
+                    }
                     inverse = .move(destination, source)
                 case .trash(let source):
                     var trashed: NSURL?
@@ -220,8 +328,20 @@ enum LocalFiles {
                 case .textFile(let destination):
                     try Data().write(to: destination, options: .withoutOverwriting)
                     inverse = .trash(destination)
+                case .compress(let sources, let destination):
+                    try ArchiveFiles.compress(
+                        sources, to: destination, control: control ?? FileOperationControl())
+                    inverse = .trash(destination)
+                case .extract(let source, let destination):
+                    try ArchiveFiles.extract(
+                        source, to: destination, control: control ?? FileOperationControl())
+                    inverse = .trash(destination)
+                case .replace, .renameBatch:
+                    preconditionFailure("Replacement is handled as a recoverable transaction")
                 }
                 batch.inverse.insert(inverse, at: 0)
+            } catch is CancellationError {
+                batch.cancelled = true; batch.failed.append(contentsOf: operations[index...]); break
             } catch { batch.errors.append(error.localizedDescription); batch.failed.append(op) }
         }
         return batch
@@ -248,8 +368,11 @@ enum FileOrdering {
             var type = ""
             if sort == .kind {
                 let key = hit.kind + ":" + hit.url.pathExtension.lowercased()
-                if let cached = types[key] { type = cached }
-                else { type = hit.typeName; types[key] = type }
+                if let cached = types[key] {
+                    type = cached
+                } else {
+                    type = hit.typeName; types[key] = type
+                }
             }
             entries.append(Entry(hit: hit, name: name, type: type))
         }
@@ -261,10 +384,14 @@ enum FileOrdering {
             let comparison: ComparisonResult
             switch sort {
             case .modified:
-                comparison = a.hit.mtime == b.hit.mtime ? .orderedSame
+                comparison =
+                    a.hit.mtime == b.hit.mtime
+                    ? .orderedSame
                     : a.hit.mtime < b.hit.mtime ? .orderedAscending : .orderedDescending
             case .size:
-                comparison = a.hit.size == b.hit.size ? .orderedSame
+                comparison =
+                    a.hit.size == b.hit.size
+                    ? .orderedSame
                     : a.hit.size < b.hit.size ? .orderedAscending : .orderedDescending
             case .kind: comparison = a.type.localizedStandardCompare(b.type)
             default: comparison = a.name.localizedStandardCompare(b.name)
@@ -281,9 +408,16 @@ enum FileOrdering {
         _ hits: [Hit], sort: FileSort, ascending: Bool, showHidden: Bool, isSearch: Bool
     ) async throws -> [Hit] {
         try await BackgroundWork.run {
-            try sorted(hits, sort: sort, ascending: ascending, showHidden: showHidden, isSearch: isSearch)
+            try sorted(
+                hits, sort: sort, ascending: ascending, showHidden: showHidden, isSearch: isSearch)
         }
     }
+}
+
+/// Pixel sizes for 16-point rows and large previews on Retina displays.
+enum FileIconSize: Int, Sendable {
+    case row = 32
+    case preview = 256
 }
 
 final class FileIcons: @unchecked Sendable {
@@ -293,16 +427,16 @@ final class FileIcons: @unchecked Sendable {
         let queue = OperationQueue(); queue.name = "FinderSearch.icons";
         queue.qualityOfService = .utility; queue.maxConcurrentOperationCount = 4; return queue
     }()
-    private init() { cache.countLimit = 1024 }
+    private init() { cache.countLimit = 1024; cache.totalCostLimit = 96 * 1024 * 1024 }
     private final class Request: @unchecked Sendable {
         private let lock = NSLock()
         private var cancelled = false
         func cancel() { lock.withLock { cancelled = true } }
         var isCancelled: Bool { lock.withLock { cancelled } }
     }
-    func load(_ hit: Hit) async -> NSImage? {
+    func load(_ hit: Hit, size: FileIconSize = .preview) async -> NSImage? {
         guard !Task.isCancelled else { return nil }
-        let key = (hit.path + ":" + String(hit.mtime)) as NSString
+        let key = (hit.path + ":" + String(hit.mtime) + ":" + String(size.rawValue)) as NSString
         if let image = cache.object(forKey: key) { return image }
         let request = Request()
         return await withTaskCancellationHandler {
@@ -310,28 +444,71 @@ final class FileIcons: @unchecked Sendable {
                 queue.addOperation {
                     // A cancelled view still resumes its continuation, but skips
                     // the expensive filesystem/icon lookup when its job starts.
-                    continuation.resume(returning: request.isCancelled ? nil : self.icon(hit))
+                    continuation.resume(
+                        returning: request.isCancelled ? nil : self.icon(hit, size: size))
                 }
             }
         } onCancel: {
             request.cancel()
         }
     }
-    func placeholder(_ hit: Hit) -> NSImage {
+    func placeholder(_ hit: Hit, size: FileIconSize = .preview) -> NSImage {
         let type =
             hit.kind == "dir"
             ? UTType.folder : UTType(filenameExtension: hit.url.pathExtension) ?? .data
-        let key = "type:" + type.identifier
+        let key = "type:" + type.identifier + ":" + String(size.rawValue)
         if let image = cache.object(forKey: key as NSString) { return image }
-        let image = NSWorkspace.shared.icon(for: type)
-        cache.setObject(image, forKey: key as NSString)
+        let image = ImageRasterizer.bitmap(
+            NSWorkspace.shared.icon(for: type), pixels: size.rawValue)
+        cache.setObject(image, forKey: key as NSString, cost: ImageRasterizer.cost(image))
         return image
     }
-    func icon(_ hit: Hit) -> NSImage {
-        let key = (hit.path + ":" + String(hit.mtime)) as NSString
+    /// Runs on the icon queue. IconServices images otherwise rasterize lazily on
+    /// the main thread the first time each grid cell draws.
+    func icon(_ hit: Hit, size: FileIconSize = .preview) -> NSImage {
+        let key = (hit.path + ":" + String(hit.mtime) + ":" + String(size.rawValue)) as NSString
         if let image = cache.object(forKey: key) { return image }
-        let image = NSWorkspace.shared.icon(forFile: hit.path)
-        cache.setObject(image, forKey: key)
+        let image = ImageRasterizer.bitmap(
+            NSWorkspace.shared.icon(forFile: hit.path), pixels: size.rawValue)
+        cache.setObject(image, forKey: key, cost: ImageRasterizer.cost(image))
         return image
+    }
+}
+
+/// Produces fully decoded bitmap images off the main thread so drawing a cell
+/// only uploads pixels instead of decoding or rasterizing them.
+enum ImageRasterizer {
+    static let iconPixels = 256
+    static func bitmap(_ image: NSImage, pixels: Int = iconPixels) -> NSImage {
+        var rect = NSRect(x: 0, y: 0, width: pixels, height: pixels)
+        guard let source = image.cgImage(forProposedRect: &rect, context: nil, hints: nil),
+            let decoded = decode(source, maxPixels: pixels)
+        else { return image }
+        return NSImage(cgImage: decoded, size: aspectSize(decoded, points: Double(pixels) / 2))
+    }
+    static func decode(_ image: CGImage, maxPixels: Int) -> CGImage? {
+        let scale = min(1, Double(maxPixels) / Double(max(image.width, image.height, 1)))
+        let width = max(1, Int(Double(image.width) * scale))
+        let height = max(1, Int(Double(image.height) * scale))
+        guard
+            let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                    | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+    static func aspectSize(_ image: CGImage, points: Double) -> NSSize {
+        let longest = Double(max(image.width, image.height, 1))
+        return NSSize(
+            width: points * Double(image.width) / longest,
+            height: points * Double(image.height) / longest)
+    }
+    static func cost(_ image: NSImage) -> Int {
+        guard let rep = image.representations.first else { return 1 }
+        return max(1, rep.pixelsWide * rep.pixelsHigh * 4)
     }
 }

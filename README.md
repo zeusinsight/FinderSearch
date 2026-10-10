@@ -41,7 +41,7 @@ warm runs per query; both engines returned the same single match. Spotlight was
 queried through native `NSMetadataQuery`, with no per-query process launch.
 
 These are **search backend timings**, not Finder’s rendered UI or FinderSearch’s
-end-to-end latency. The app also waits 150 ms after typing stops.
+end-to-end latency. The app waits 50 ms after typing stops; Return submits a pending search immediately.
 [Method, p95 timings, raw samples, and reproduction](docs/benchmarks/README.md).
 
 ## Download

@@ -89,7 +89,10 @@ opening or previewing a cloud file may trigger a provider download.
   files for their actions in every view, including columns and gallery.
   Rename edits the name in place: Return saves, Escape or clicking away cancels.
   Files initially select their name without the extension; folders select the whole name.
-- **Search:** Command-F; requests begin 150 ms after typing stops. Search This Mac or
+  Creating a folder or text file immediately starts inline rename. Select multiple items
+  and choose Rename for Replace Text, Add Text, or Numbered Names with a preview.
+  Tabs restore folders, view modes, sorting, selection, and scroll positions on relaunch.
+- **Search:** Command-F; requests begin 50 ms after typing stops; Return submits a pending search immediately. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
 - **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
@@ -97,14 +100,23 @@ opening or previewing a cloud file may trigger a provider download.
   debounce, IPC, and rendering.
 - **Select and preview:** click, Command-click, or Shift-click; double-click or
   Command-O opens, Space/Command-Y uses Quick Look, and Return renames.
+  In Quick Look, arrow keys browse the current selection (or visible files); Space closes it.
 - **File actions:** Command-C copies file URLs, Command-V copies items, and
   Option-Command-V moves them. Folder drops move; Option-drag copies. Conflicts
-  report an error without overwriting. Command-Shift-N creates a uniquely named folder.
+  offer Replace, Keep Both, or Skip, with an apply-to-all option. Replace preserves
+  the old item in Trash for Undo. Long operations show progress and a Cancel button;
+  cancellation retains completed items and restores interrupted replacements.
+  Command-Shift-N creates a uniquely named folder. Hover over a folder while dragging
+  to open it after a short delay.
 - **Trash and undo:** Command-Delete moves selected files to recoverable Trash;
   while editing text it remains a text-editing command. Command-Z and
   Shift-Command-Z undo/redo file actions and tags. History is in memory per tab.
 - **Other actions:** Get Info, Duplicate, Copy Path, tags, sharing, and revealing in Finder.
-  Command-T creates a tab; Command-N creates a window; Command-Shift-G opens Go to Folder.
+  Open With lists compatible applications and offers an application chooser.
+  Compress creates a ZIP; Extract ZIP creates a uniquely named folder beside the archive.
+  Standard, unencrypted ZIPs are supported; ZIP64, symbolic links, and special files are rejected.
+  Command-T creates a tab; drag tabs to reorder, middle-click to close, and Command-Shift-T
+  reopens the last closed tab. Command-N creates a window; Command-Shift-G opens Go to Folder.
   Command-Shift-period toggles hidden files; Command-R refreshes.
 
 Recents uses indexed files modified within 30 days, limited to 1,000 returned
@@ -170,10 +182,9 @@ native interface conventions.
 ## Known limitations
 
 No Finder extensions, AirDrop integration, disclosure rows, advanced grouping,
-batch rename, smart folders, cloud-management UI, or persistent session/undo state.
+smart folders, cloud-management UI, or persistent undo history.
 Column ancestors remain snapshots until revisited. New Text File creates an empty
-`untitled.txt` with a unique name; Rename edits names inline. Clipboard/drop conflicts
-have no merge/overwrite dialog.
+`untitled.txt` with a unique name. Folder replacement replaces the whole folder; it does not merge contents.
 Full keyboard/multi-drag parity remains in progress.
 
 ## Credits
@@ -182,3 +193,11 @@ The search engine is [fsearch](https://github.com/noahdunnagan/fsearch), created
 **Noah Dunnagan**, distributed under the MIT license and vendored unmodified at
 `af9476d39ec98108552670adf6badbbd77331b0a`.
 See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and [its license](../vendor/fsearch/LICENSE).
+
+### Drag selection
+
+In icon view or the gallery strip, drag from empty space to draw a selection box.
+In list view, start below the rows and drag upward to select them. Hold Shift to
+add to the selection or Command to toggle the enclosed files. Escape cancels the
+gesture and restores the previous selection. Drag toward the edge to scroll.
+Starting a drag on a file keeps the normal file drag-and-drop behavior.

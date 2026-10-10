@@ -12,6 +12,11 @@ they were verified.
 - `Engine.swift`: fsearch JSON-lines client, reply types, cancellation, and timeouts.
 - `FileSystem.swift`: local directory enumeration, file mutations, icons, and previews.
 - `FileList.swift`: native fixed-height AppKit table and its selection/drop handling.
+- `SessionState.swift`, `BrowserTabBar.swift`, and `TabControls.swift`: session snapshots, tab UI, and native tab interactions.
+- `FileOperationControl.swift` and `FileTransfers.swift`: cancellation, native copies,
+  progress, and explicit conflict choices.
+- `ArchiveFiles.swift` and `BatchRename.swift`: staged archive and rename transactions.
+- `OpenWith.swift`, `QuickLookBrowser.swift`, and `SpringLoading.swift`: shared file UX.
 - `FileViews.swift`: thumbnails, grid-adjacent components, column/gallery views, and drops.
 - `FolderLoadingSkeleton.swift`: inexpensive placeholders for uncached listings.
 - `Tests/FinderSearchTests`: file-operation, search, and responsiveness regressions.

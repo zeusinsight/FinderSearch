@@ -28,14 +28,14 @@ extension SearchModel {
     func newFolder() {
         guard canWriteHere else { return }
         let folder = location
-        prepareOperations(name: "New Folder") {
+        prepareOperations(name: "New Folder", renameCreated: true) {
             [.folder(LocalFiles.availableName(in: folder, name: "untitled folder"))]
         }
     }
     func newTextFile() {
         guard canWriteHere else { return }
         let folder = location
-        prepareOperations(name: "New Text File") {
+        prepareOperations(name: "New Text File", renameCreated: true) {
             [.textFile(LocalFiles.availableName(in: folder, name: "untitled.txt"))]
         }
     }
@@ -68,32 +68,6 @@ extension SearchModel {
             NSPasteboard.general.readObjects(
                 forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         transfer(urls, to: location, move: move)
-    }
-    func transfer(_ urls: [URL], to folder: URL, move: Bool) {
-        guard !busy else { return }
-        var seen = Set<String>()
-        let items = urls.filter { $0.isFileURL && seen.insert($0.path).inserted }
-        guard !items.isEmpty else { return }
-        prepareOperations(name: move ? "Move" : "Copy") {
-            let target = folder.resolvingSymlinksInPath().path
-            return try items.compactMap { source in
-                try Task.checkCancellation()
-                let destination = folder.appendingPathComponent(source.lastPathComponent)
-                if source.standardizedFileURL == destination.standardizedFileURL {
-                    return move
-                        ? nil
-                        : .copy(
-                            source,
-                            LocalFiles.availableName(
-                                in: folder, name: source.lastPathComponent, suffix: " copy"))
-                }
-                if target.hasPrefix(source.resolvingSymlinksInPath().path + "/") {
-                    throw Engine.Failure.message(
-                        "A folder cannot be moved or copied inside itself.")
-                }
-                return move ? .move(source, destination) : .copy(source, destination)
-            }
-        }
     }
     func info() {
         guard let hit = selected else { return }

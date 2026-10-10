@@ -247,4 +247,37 @@ final class PerformanceTests: XCTestCase {
         print("PERFORMANCE native list restore: 500 → 782 rows = \(milliseconds) ms")
     }
 
+    @MainActor func testTabSwitchUpdatesExistingTableImmediatelyAndRestoresPerTabScroll() throws {
+        let first = SearchModel(), second = SearchModel()
+        let hits = (0..<1000).map {
+            Hit(path: "/fixture/file-\($0).txt", kind: "file", size: 1, mtime: 0, score: 0)
+        }
+        first.hits = hits; second.hits = hits
+        first.scrollAnchor = hits[300].path; first.scrollOffset = 7
+        second.selection = [hits[10].path]
+        let list = FileList(model: first, focusFiles: {}, newTab: { _ in })
+        let coordinator = list.makeCoordinator()
+        let scroll = list.makeView(coordinator: coordinator)
+        scroll.frame = NSRect(x: 0, y: 0, width: 800, height: 400)
+        let table = try XCTUnwrap(scroll.documentView as? BrowserTable)
+        coordinator.update(); scroll.layoutSubtreeIfNeeded()
+        let firstOffset = table.rect(ofRow: 300).minY + 7
+        XCTAssertEqual(scroll.contentView.bounds.minY, firstOffset, accuracy: 1)
+
+        let start = Date()
+        coordinator.parent = FileList(model: second, focusFiles: {}, newTab: { _ in })
+        coordinator.update()
+        let milliseconds = Date().timeIntervalSince(start) * 1000
+        XCTAssertTrue(scroll.documentView === table)
+        XCTAssertEqual(table.numberOfRows, 1000)
+        XCTAssertEqual(table.selectedRowIndexes, IndexSet(integer: 10))
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1)
+        XCTAssertLessThan(milliseconds, 100, "Cached tabs must update without a deferred load")
+
+        coordinator.parent = list; coordinator.update()
+        XCTAssertEqual(scroll.contentView.bounds.minY, firstOffset, accuracy: 1)
+        XCTAssertTrue(table.selectedRowIndexes.isEmpty)
+        print("PERFORMANCE tab switch: 1,000 cached rows = \(milliseconds) ms")
+    }
+
 }

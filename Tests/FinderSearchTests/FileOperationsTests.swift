@@ -444,7 +444,8 @@ final class FileOperationsTests: XCTestCase {
 
     @MainActor func testSearchDebouncesToFinalQuery() async throws {
         let engine = RecordingSearchEngine()
-        let model = SearchModel(engine: engine)
+        // Keep edits inside an explicit window independent of the production delay.
+        let model = SearchModel(engine: engine, searchDebounce: .milliseconds(300))
         model.query = "f"
         try await Task.sleep(for: .milliseconds(100))
         model.query = "fi"

@@ -11,7 +11,8 @@ import UniformTypeIdentifiers
         WindowGroup(id: "browser") {
             BrowserRoot().frame(minWidth: 850, minHeight: 470).onAppear {
                 if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-                    let icon = NSImage(contentsOf: url) {
+                    let icon = NSImage(contentsOf: url)
+                {
                     NSApp.applicationIconImage = icon
                 }
                 NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
@@ -22,6 +23,9 @@ import UniformTypeIdentifiers
             CommandGroup(replacing: .newItem) {
                 Button("New Window") { openWindow(id: "browser") }.keyboardShortcut("n")
                 Button("New Tab") { workspace?.newTab() }.keyboardShortcut("t")
+                Button("Reopen Closed Tab") { workspace?.reopenClosedTab() }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(workspace?.closedTabs.isEmpty != false)
                 Button("New Folder") { model?.newFolder() }.keyboardShortcut(
                     "n", modifiers: [.command, .shift]
                 ).disabled(model?.busy != false || model?.canWriteHere != true)
@@ -52,8 +56,14 @@ import UniformTypeIdentifiers
             CommandGroup(after: .newItem) {
                 Button("Open Selected") { model?.open() }.keyboardShortcut("o").disabled(
                     model?.selection.isEmpty != false)
-                Button("Rename") { model?.rename() }.disabled(
-                    model?.selection.count != 1 || model?.busy == true)
+                Button("Rename…") { model?.renameItems() }.disabled(
+                    model?.selection.isEmpty != false || model?.busy == true)
+                Button("Compress") { model?.compress() }.disabled(
+                    model?.selection.isEmpty != false || model?.busy == true
+                        || model?.canWriteHere != true)
+                Button("Extract ZIP") { model?.extract() }.disabled(
+                    model?.selectedItems.contains { $0.url.pathExtension.lowercased() == "zip" }
+                        != true || model?.busy == true)
                 Button("Duplicate") { model?.duplicate() }.keyboardShortcut("d").disabled(
                     model?.selection.isEmpty != false || model?.busy == true)
                 Button("Move to Trash") {
@@ -102,9 +112,9 @@ import UniformTypeIdentifiers
 }
 extension Notification.Name { static let focusSearch = Notification.Name("focusSearch") }
 struct BrowserRoot: View {
-    @StateObject private var workspace = BrowserWorkspace()
+    @StateObject private var workspace = BrowserWorkspace(sessionDefaults: .standard)
     var body: some View {
-        BrowserView(workspace: workspace, model: workspace.current).id(workspace.selectedTab)
+        BrowserView(workspace: workspace, model: workspace.current)
             .focusedSceneObject(workspace).focusedSceneObject(workspace.current)
     }
 }
@@ -117,13 +127,15 @@ struct BrowserView: View {
     private var searchFocused: Bool { keyboardFocus == .search }
     @State private var fileNavigationActive = false
     @State private var keyMonitor: Any?
+    @State private var browserWindow: NSWindow?
     @State private var iconSize: Double = 64
     @State private var gridColumns = 5
     private let tags = SidebarTags.values
     var body: some View {
         NavigationSplitView {
             BrowserSidebar(
-                state: SidebarState(route: model.route, favorites: workspace.favorites,
+                state: SidebarState(
+                    route: model.route, favorites: workspace.favorites,
                     volumes: workspace.volumes, ejectingVolumes: workspace.ejectingVolumes,
                     showDiskAccessHint: model.ready && !model.fullDiskAccess),
                 select: { route in
@@ -134,7 +146,7 @@ struct BrowserView: View {
             ).equatable()
         } detail: {
             VStack(spacing: 0) {
-                if workspace.tabs.count > 1 { tabBar }
+                if workspace.tabs.count > 1 { BrowserTabBar(workspace: workspace) }
                 if model.isSearch { searchScopeBar }
                 if let error = model.error {
                     HStack {
@@ -211,39 +223,16 @@ struct BrowserView: View {
             }
             .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
             .searchFocused($keyboardFocus, equals: .search)
+            .onSubmit(of: .search) { model.submitSearch() }
         }
+        .background(BrowserWindowCapture { browserWindow = $0 }.frame(width: 0, height: 0))
         .onAppear {
             model.start()
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if searchFocused && event.keyCode == 125 && !model.sortedHits.isEmpty {
-                    focusFiles(); model.selection = [model.sortedHits[0].path]; return nil
-                }
-                guard NSApp.keyWindow?.isSheet != true, model.preview == nil,
-                    fileNavigationActive && !searchFocused,
-                    !(NSApp.keyWindow?.firstResponder is NSTextView)
-                else { return event }
-                if event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
-                    if event.keyCode == 49 { model.preview = model.selected; return nil }
-                    if event.keyCode == 36 { model.rename(); return nil }
-                    if event.keyCode == 53 { model.selection = []; return nil }
-                    if (model.viewMode == .icons || model.viewMode == .gallery),
-                        [123, 124, 125, 126].contains(event.keyCode)
-                    {
-                        let stride = model.viewMode == .gallery ? 1 : gridColumns
-                        let delta =
-                            event.keyCode == 123
-                            ? -1
-                            : event.keyCode == 124 ? 1 : event.keyCode == 125 ? stride : -stride
-                        model.moveSelection(
-                            by: delta, extending: event.modifierFlags.contains(.shift))
-                        return nil
-                    }
-                }
-                if event.modifierFlags.contains(.command), event.keyCode == 125 {
-                    model.open(); return nil
-                }
-                return event
-            }
+            installKeyMonitor()
+        }
+        .onChange(of: model.id) { _, _ in
+            keyboardFocus = nil; fileNavigationActive = false
+            model.start(); installKeyMonitor()
         }
         .onDisappear {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }; keyMonitor = nil
@@ -262,8 +251,11 @@ struct BrowserView: View {
             model.extraHits = []; model.selection.formIntersection(Set(model.hits.map(\.path)))
         }
         .onChange(of: model.renaming) { _, hit in
-            if hit != nil { keyboardFocus = nil; fileNavigationActive = false }
-            else if !searchFocused { fileNavigationActive = true }
+            if hit != nil {
+                keyboardFocus = nil; fileNavigationActive = false
+            } else if !searchFocused {
+                fileNavigationActive = true
+            }
         }
         .onChange(of: keyboardFocus) { _, focus in
             if focus == .search { fileNavigationActive = false }
@@ -271,43 +263,61 @@ struct BrowserView: View {
         .onChange(of: model.query) { _, text in
             if model.isSearch && model.sort != .relevance { model.sort = .relevance }
         }
-        .task { await model.monitor() }
-        .sheet(item: $model.preview) { hit in
-            VStack(spacing: 0) {
-                HStack {
-                    Text(hit.name).font(.headline).lineLimit(1); Spacer();
-                    Button("Open") {
-                        model.open(hit); model.preview = nil
-                    }; Button("Done") { model.preview = nil }.keyboardShortcut(.cancelAction)
-                }.padding(); Divider(); QuickLook(url: hit.url).frame(minWidth: 650, minHeight: 470)
+        .task(id: model.id) { await model.monitor() }
+        .sheet(item: $model.conflict) { conflict in
+            ConflictSheet(conflict: conflict) { choice, all in
+                model.resolveConflict(choice, applyToAll: all)
             }
+            .interactiveDismissDisabled()
+        }
+        .sheet(item: $model.batchRename) { request in
+            BatchRenameSheet(model: model, request: request)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { model.preview != nil }, set: { if !$0 { model.preview = nil } })
+        ) {
+            QuickLookBrowser(model: model)
         }
     }
-    private var tabBar: some View {
-        HStack(spacing: 0) {
-            ForEach(workspace.tabs) { tab in
-                HStack(spacing: 8) {
-                    Button {
-                        workspace.selectedTab = tab.id
-                    } label: {
-                        Text(tab.title).lineLimit(1).frame(maxWidth: .infinity)
-                    }.buttonStyle(.plain)
-                    Button {
-                        workspace.closeTab(tab.id)
-                    } label: {
-                        Image(systemName: "xmark").font(.system(size: 10))
-                    }.buttonStyle(.plain).help("Close Tab").disabled(tab.busy)
-                }.padding(.horizontal, 12).padding(.vertical, 8).background(
-                    tab.id == workspace.selectedTab
-                        ? Color(nsColor: .controlBackgroundColor) : Color.clear)
-                Divider()
+    private func installKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard let browserWindow, NSApp.keyWindow === browserWindow else { return event }
+            if let command = TabShortcut.command(for: event), !browserWindow.isSheet {
+                if command == .new { workspace.newTab() } else { workspace.reopenClosedTab() }
+                return nil
             }
-            Button {
-                workspace.newTab()
-            } label: {
-                Image(systemName: "plus")
-            }.buttonStyle(.plain).padding(.horizontal, 12).help("New Tab")
-        }.frame(height: 32).background(Color(nsColor: .windowBackgroundColor))
+            if searchFocused && event.keyCode == 125 && !model.sortedHits.isEmpty {
+                focusFiles(); model.selection = [model.sortedHits[0].path]; return nil
+            }
+            guard NSApp.keyWindow?.isSheet != true, model.preview == nil,
+                fileNavigationActive && !searchFocused,
+                !(NSApp.keyWindow?.firstResponder is NSTextView)
+            else { return event }
+            if event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+                if event.keyCode == 49 { model.preview = model.selected; return nil }
+                if event.keyCode == 36 { model.rename(); return nil }
+                if event.keyCode == 53 { model.selection = []; return nil }
+                if (model.viewMode == .icons || model.viewMode == .gallery
+                    || (model.viewMode == .columns && [125, 126].contains(event.keyCode))),
+                    [123, 124, 125, 126].contains(event.keyCode)
+                {
+                    let stride = model.viewMode == .icons ? gridColumns : 1
+                    let delta =
+                        event.keyCode == 123
+                        ? -1
+                        : event.keyCode == 124 ? 1 : event.keyCode == 125 ? stride : -stride
+                    model.moveSelection(
+                        by: delta, extending: event.modifierFlags.contains(.shift))
+                    return nil
+                }
+            }
+            if event.modifierFlags.contains(.command), event.keyCode == 125 {
+                model.open(); return nil
+            }
+            return event
+        }
     }
     private var searchScopeBar: some View {
         HStack(spacing: 10) {
@@ -326,7 +336,8 @@ struct BrowserView: View {
     }
     @ViewBuilder private var fileContent: some View {
         if model.viewMode == .columns && model.canWriteHere {
-            ColumnBrowser(model: model, focusFiles: { focusFiles() }, rowMenu: rowActions)
+            ColumnBrowser(model: model, focusFiles: { focusFiles() }, rowMenu: rowActions).id(
+                model.id)
         } else if (model.loading || model.searching) && model.sortedHits.isEmpty {
             FolderLoadingSkeleton(mode: model.viewMode, iconSize: iconSize)
         } else if model.sortedHits.isEmpty {
@@ -341,17 +352,18 @@ struct BrowserView: View {
             }
         } else {
             switch model.viewMode {
-            case .icons: iconGrid
+            case .icons: iconGrid.id(model.id)
             case .list: fileTable
             case .columns:
                 fileTable
-            case .gallery: GalleryBrowser(model: model, select: select, rowMenu: rowActions)
+            case .gallery:
+                GalleryBrowser(model: model, select: select, rowMenu: rowActions).id(model.id)
             }
         }
     }
     private var iconGrid: some View {
         GeometryReader { geometry in
-            iconScroll
+            iconScroll(minHeight: geometry.size.height)
                 .onAppear { updateColumns(geometry.size.width) }
                 .onChange(of: geometry.size.width) { _, width in updateColumns(width) }
                 .onChange(of: iconSize) { _, _ in updateColumns(geometry.size.width) }
@@ -360,7 +372,7 @@ struct BrowserView: View {
     private func updateColumns(_ width: Double) {
         gridColumns = max(1, Int((width - 36) / (iconSize + 69)))
     }
-    private var iconScroll: some View {
+    private func iconScroll(minHeight: Double) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(
@@ -368,9 +380,14 @@ struct BrowserView: View {
                     alignment: .leading, spacing: 18
                 ) {
                     ForEach(model.sortedHits) { hit in iconCell(hit) }
-                }.padding(18)
+                }.scrollTargetLayout().padding(18)
+                    .frame(minHeight: minHeight, alignment: .top)
+                    .marqueeSelection(model: model, focusFiles: focusFiles)
             }
-            .onChange(of: model.focusedPath) { _, path in if let path { proxy.scrollTo(path) } }
+            .scrollPosition(id: $model.scrollAnchor)
+            .onChange(of: model.focusedPath) { _, path in
+                if !model.marqueeSelecting, let path { proxy.scrollTo(path) }
+            }
         }
     }
     private func iconCell(_ hit: Hit) -> some View {
@@ -385,18 +402,19 @@ struct BrowserView: View {
             model.selection.contains(hit.path) ? Color.accentColor.opacity(0.22) : Color.clear,
             in: RoundedRectangle(cornerRadius: 5)
         )
-        .contentShape(Rectangle()).onTapGesture(count: 2) {
-            select(hit); model.open(hit)
-        }.onTapGesture { select(hit) }
+        .contentShape(Rectangle())
+        .modifier(FileClickActions(select: { select(hit) }, open: { model.open(hit) }))
         .contextMenu { rowActions(hit) }.draggable(hit.url)
         .modifier(FolderDropTarget(hit: hit, model: model))
         .onHover { hovering in if hovering && hit.isFolder { model.prefetchFolder(hit.url) } }
+        .marqueeItem(hit.path, in: model.id)
         .id(hit.path)
         .accessibilityLabel(hit.name).accessibilityAddTraits(
             model.selection.contains(hit.path) ? [.isSelected] : [])
     }
     private var fileTable: some View {
-        FileList(model: model, focusFiles: focusFiles, newTab: { workspace.newTab($0) },
+        FileList(
+            model: model, focusFiles: focusFiles, newTab: { workspace.newTab($0) },
             addFavorite: { workspace.addFavorite($0) })
     }
     private var pathBar: some View {
@@ -436,11 +454,25 @@ struct BrowserView: View {
             if model.loading || model.searching || model.sorting || model.busy {
                 ProgressView().controlSize(.mini)
             }
-            Text(
-                model.selection.isEmpty
-                    ? (model.isSearch && model.hits.count == 500
-                        ? "First 500 matches" : "\(model.sortedHits.count) items")
-                    : "\(model.selection.count) selected")
+            if let progress = model.operationProgress {
+                if let fraction = progress.fraction {
+                    ProgressView(value: fraction).frame(width: 100)
+                }
+                Text("\(model.operationName) · \(progress.item)").lineLimit(1)
+                if progress.bytes > 0 {
+                    Text(
+                        ByteCountFormatter.string(fromByteCount: progress.bytes, countStyle: .file)
+                    )
+                    .monospacedDigit()
+                }
+                Button("Cancel") { model.cancelOperation() }.controlSize(.small)
+            } else {
+                Text(
+                    model.selection.isEmpty
+                        ? (model.isSearch && model.hits.count == 500
+                            ? "First 500 matches" : "\(model.sortedHits.count) items")
+                        : "\(model.selection.count) selected")
+            }
             if model.isSearch { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
             Spacer()
             if model.viewMode == .icons {
@@ -457,10 +489,12 @@ struct BrowserView: View {
         Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
         Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
         Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
-        Button("Move Items Here") { model.paste(move: true) }.disabled(model.busy || !model.canWriteHere)
+        Button("Move Items Here") { model.paste(move: true) }.disabled(
+            model.busy || !model.canWriteHere)
         Divider()
         Button("Open in New Tab") { workspace.newTab(model.location) }.disabled(!model.canWriteHere)
-        Button("Add Folder to Sidebar") { workspace.addFavorite(model.location) }.disabled(!model.canWriteHere)
+        Button("Add Folder to Sidebar") { workspace.addFavorite(model.location) }.disabled(
+            !model.canWriteHere)
         Divider()
         Menu("View") {
             ForEach(FileViewMode.allCases, id: \.self) { mode in
@@ -478,7 +512,7 @@ struct BrowserView: View {
         Divider()
         Button("Get Info") { model.info() }.disabled(model.selection.isEmpty)
         Button("Quick Look") { model.preview = model.selected }.disabled(model.selection.isEmpty)
-        Button("Rename…") { model.rename() }.disabled(model.selection.count != 1 || model.busy)
+        Button("Rename…") { model.renameItems() }.disabled(model.selection.isEmpty || model.busy)
         Button("Duplicate") { model.duplicate() }.disabled(model.selection.isEmpty || model.busy)
         Button("Copy") { model.copy() }.disabled(model.selection.isEmpty)
         Button("Copy Path") { model.copyPath() }.disabled(model.selection.isEmpty)
@@ -498,6 +532,7 @@ struct BrowserView: View {
     }
     @ViewBuilder private func rowActions(_ hit: Hit) -> some View {
         Button("Open") { model.open(hit) }
+        OpenWithMenu(model: model, hit: hit)
         Button("Open in New Tab") { workspace.newTab(hit.url) }.disabled(!hit.isFolder)
         Button("Quick Look") { model.preview = hit }
         Button("Open Enclosing Folder") { model.navigate(hit.url.deletingLastPathComponent()) }
@@ -506,8 +541,14 @@ struct BrowserView: View {
             contextual(hit); model.info()
         }
         Button("Rename…") {
-            model.selection = [hit.path]; model.rename()
+            contextual(hit); model.renameItems()
         }
+        Button("Compress") {
+            contextual(hit); model.compress()
+        }.disabled(model.busy || !model.canWriteHere)
+        Button("Extract ZIP") {
+            contextual(hit); model.extract()
+        }.disabled(model.busy || hit.url.pathExtension.lowercased() != "zip")
         Button("Duplicate") {
             contextual(hit); model.duplicate()
         }

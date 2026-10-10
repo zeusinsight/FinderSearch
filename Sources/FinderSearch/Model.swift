@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Darwin
+import Combine
 
 enum FileViewMode: String, CaseIterable {
     case icons, list, columns, gallery
@@ -53,7 +54,15 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             selectionAnchor = focusedPath
         }
     }
+    var marqueeSelecting = false
     @Published var focusedPath: String?
+    // Scroll bindings track their own position. Persisting that position must
+    // not invalidate the browser and every visible file cell on each row.
+    let scrollChanges = PassthroughSubject<Void, Never>()
+    var scrollAnchor: String? {
+        didSet { if scrollAnchor != oldValue { scrollChanges.send() } }
+    }
+    var scrollOffset: Double = 0
     private var selectionAnchor: String?
     @Published var searching = false
     @Published var loading = false
@@ -63,7 +72,22 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var entries = 0
     @Published var fullDiskAccess = false
     @Published var elapsed: Double = 0
-    @Published var preview: Hit?
+    @Published var preview: Hit? {
+        didSet {
+            if oldValue == nil, let preview {
+                previewItems =
+                    selection.count > 1 && selection.contains(preview.path)
+                    ? selectedItems : sortedHits
+                if !previewItems.contains(where: { $0.path == preview.path }) {
+                    previewItems = [preview]
+                }
+            } else if preview == nil {
+                previewItems = []
+            }
+        }
+    }
+    var previewItems: [Hit] = []
+    let springLoader = SpringLoader()
     @Published private(set) var renaming: Hit?
     @Published var viewMode =
         FileViewMode(rawValue: UserDefaults.standard.string(forKey: "viewMode") ?? "icons")
@@ -75,16 +99,28 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var ascending = true { didSet { invalidateDerived(preserveOrder: true) } }
     @Published var showHidden = false { didSet { invalidateDerived(); schedule() } }
     @Published var busy = false
+    @Published var operationProgress: FileOperationProgress?
+    @Published var operationName = ""
+    @Published var conflict: FileConflict?
+    @Published var batchRename: BatchRenameRequest?
+    var conflictContinuation: CheckedContinuation<ConflictChoice, Never>?
+    var allConflictChoice: ConflictChoice?
+    private var operationControl: FileOperationControl?
+    private var activeOperationID: UUID?
+    var preparationTask: Task<Void, Never>?
     @Published var undoStack: [FileJournal] = []
     @Published var redoStack: [FileJournal] = []
     @Published var backStack: [URL] = []
     @Published var forwardStack: [URL] = []
+    private let searchDebounce: Duration
+    private var searchDebouncing = false
     private let engine: any SearchService
     private let diskAccessCheck: @Sendable () -> Bool
     private let folderLoader: @Sendable (URL, Bool) async throws -> [Hit]
     private let folderPreviewLoader: @Sendable (URL, Bool) async throws -> [Hit]
     init(
         engine: any SearchService = Engine(),
+        searchDebounce: Duration = .milliseconds(50),
         diskAccessCheck: @escaping @Sendable () -> Bool = { FullDiskAccess.isGranted() },
         folderLoader: @escaping @Sendable (URL, Bool) async throws -> [Hit] = {
             try await LocalFiles.load($0, hidden: $1)
@@ -94,6 +130,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         }
     ) {
         self.engine = engine
+        self.searchDebounce = searchDebounce
         self.diskAccessCheck = diskAccessCheck
         self.folderLoader = folderLoader
         self.folderPreviewLoader = folderPreviewLoader
@@ -129,7 +166,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 let ordered = try await FileOrdering.prepare(
                     items, sort: ordering, ascending: direction, showHidden: hidden,
                     isSearch: searching)
-                guard !Task.isCancelled, let self, self.orderingGeneration == revision else { return }
+                guard !Task.isCancelled, let self, self.orderingGeneration == revision else {
+                    return
+                }
                 self.selectedCache = nil
                 self.sortedCache = ordered
                 self.sorting = false
@@ -235,6 +274,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         saveDefaultSnapshot()
         changingLocation = true
         if history && url != location { backStack.append(location); forwardStack = [] }
+        if url.standardizedFileURL != location { scrollAnchor = nil; scrollOffset = 0 }
         location = url.standardizedFileURL; route = location.path
         extraHits = []; scope = ""; query = ""; fileType = ""; selection = []; sort = .name;
         ascending = true
@@ -271,10 +311,17 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             navigate(URL(fileURLWithPath: value))
         }
     }
-    func schedule() {
+    /// Flush only a pending debounce; Return must not restart an in-flight search.
+    func submitSearch() {
+        guard isSearch, searchDebouncing else { return }
+        schedule(immediate: true)
+    }
+
+    func schedule(immediate: Bool = false) {
         guard !changingLocation else { return }
         generation += 1; let revision = generation
         task?.cancel()
+        searchDebouncing = false
         guard !busy else { return }
         error = mutationError
         if isSearch { extraHits = [] }
@@ -285,12 +332,16 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             type = fileType
         let recent = route == "recents" && !isSearch
         loading = !searchingNow && !cached; searching = searchingNow
+        searchDebouncing = searchingNow && !immediate
         task = Task {
             do {
                 let result: [Hit]
                 if searchingNow || recent {
-                    try await Task.sleep(for: .milliseconds(searchingNow ? 150 : 0))
+                    if searchingNow && !immediate {
+                        try await Task.sleep(for: searchDebounce)
+                    }
                     try Task.checkCancellation()
+                    searchDebouncing = false
                     var fields: [String: Any] = [
                         "q": recent ? "mtime:<30d kind:file" : text, "limit": recent ? 1000 : 500,
                     ]
@@ -315,7 +366,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                         await Task.yield()
                         let preview = try await folderPreviewLoader(folder, hidden)
                         let ordered = try await FileOrdering.prepare(
-                            preview, sort: .name, ascending: true, showHidden: hidden, isSearch: false)
+                            preview, sort: .name, ascending: true, showHidden: hidden,
+                            isSearch: false)
                         guard revision == generation, !Task.isCancelled else { return }
                         publish(preview, ordered: ordered)
                         // Keep loading true while details fill in; the nonempty
@@ -332,7 +384,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                         result, sort: ordering, ascending: direction, showHidden: visibility,
                         isSearch: searchingNow)
                     guard revision == generation, !Task.isCancelled else { return }
-                    if ordering == sort && direction == ascending && visibility == showHidden { break }
+                    if ordering == sort && direction == ascending && visibility == showHidden {
+                        break
+                    }
                 }
                 publish(result, ordered: ordered)
                 selection.formIntersection(
@@ -342,7 +396,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 loading = false; searching = false
                 if !searchingNow {
                     saveDefaultSnapshot()
-                    if canWriteHere { prefetchFolders(Array(ordered.filter(\.isFolder).prefix(3)).map(\.url)) }
+                    if canWriteHere {
+                        prefetchFolders(Array(ordered.filter(\.isFolder).prefix(3)).map(\.url))
+                    }
                 }
             } catch is CancellationError {} catch {
                 guard revision == generation else { return };
@@ -355,16 +411,19 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         let key = SnapshotKey(route: route, hidden: showHidden)
         guard let snapshot = snapshots[key] else { return false }
         hits = snapshot.hits
-        if sort == snapshot.sort && ascending == snapshot.ascending, let ordered = snapshot.ordered {
+        if sort == snapshot.sort && ascending == snapshot.ascending, let ordered = snapshot.ordered
+        {
             orderingTask?.cancel(); orderingGeneration += 1
             sortedCache = ordered
             sorting = false
         }
         // The previous ordering can still be visible while the restored rows
         // sort in the background. Reconcile against the snapshot itself.
-        selection.formIntersection(Set(snapshot.hits.filter {
-            showHidden || !$0.name.hasPrefix(".")
-        }.map(\.path)))
+        selection.formIntersection(
+            Set(
+                snapshot.hits.filter {
+                    showHidden || !$0.name.hasPrefix(".")
+                }.map(\.path)))
         elapsed = 0
         return true
     }
@@ -372,7 +431,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         guard !isSearch, !loading, !busy else { return }
         let key = SnapshotKey(route: route, hidden: showHidden)
         snapshots[key] = Snapshot(
-            hits: hits, selection: selection, sort: sort, ascending: ascending, ordered: sortedCache)
+            hits: hits, selection: selection, sort: sort, ascending: ascending, ordered: sortedCache
+        )
         trimSnapshots(keeping: key)
     }
     private func trimSnapshots(keeping key: SnapshotKey) {
@@ -416,7 +476,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     guard !Task.isCancelled, let self else { return }
                     let key = SnapshotKey(route: folder.standardizedFileURL.path, hidden: hidden)
                     guard self.snapshots[key] == nil else { continue }
-                    self.snapshots[key] = Snapshot(hits: hits, selection: [], sort: .name,
+                    self.snapshots[key] = Snapshot(
+                        hits: hits, selection: [], sort: .name,
                         ascending: true, ordered: ordered)
                     self.trimSnapshots(keeping: key)
                 } catch { if Task.isCancelled { return } }
@@ -487,22 +548,36 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             if !NSWorkspace.shared.open(hit.url) { error = "Could not open ‘\(hit.name)’." }
         }
     }
-    func perform(_ operations: [FileMutation], name: String, history: Int = 0) {
+    func perform(
+        _ operations: [FileMutation], name: String, history: Int = 0,
+        renameCreated: URL? = nil
+    ) {
         guard !operations.isEmpty, !busy else { return }; busy = true; error = nil
         cancelRename()
         mutationError = nil
+        operationName = name
+        let operationID = UUID(); activeOperationID = operationID
+        let control = FileOperationControl { [weak self] progress in
+            Task { @MainActor in
+                guard self?.activeOperationID == operationID else { return }
+                self?.operationProgress = progress
+            }
+        }
+        operationControl = control
         task?.cancel(); prefetchTask?.cancel(); generation += 1
         snapshots.removeAll(); snapshotOrder.removeAll()
         let originalHits = hits, originalExtra = extraHits, originalSelection = selection
+        let originalOrder = sortedHits
         let folder = canWriteHere ? location : nil
         hits = OptimisticFiles.applying(operations, to: originalHits, in: folder)
+        visibleCache = OptimisticFiles.applying(operations, to: originalOrder, in: folder)
         extraHits = OptimisticFiles.applying(operations, to: originalExtra, in: nil)
         selection = OptimisticFiles.selection(
             originalSelection, after: operations, visibleHits: hits + extraHits)
         loading = false; searching = false
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                LocalFiles.apply(operations)
+                LocalFiles.apply(operations, control: control)
             }.value
             if !result.inverse.isEmpty {
                 let journal = FileJournal(name: name, operations: result.inverse)
@@ -521,15 +596,18 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 if let index = successful.firstIndex(of: failed) { successful.remove(at: index) }
             }
             hits = OptimisticFiles.applying(successful, to: originalHits, in: folder)
+            visibleCache = OptimisticFiles.applying(successful, to: originalOrder, in: folder)
             extraHits = OptimisticFiles.applying(successful, to: originalExtra, in: nil)
             selection = OptimisticFiles.selection(
                 originalSelection, after: successful, visibleHits: hits + extraHits)
             busy = false
+            operationControl = nil; activeOperationID = nil; operationProgress = nil
             if !result.errors.isEmpty { mutationError = result.errors.joined(separator: "\n") }
             var relocated = location.path
             for operation in successful {
                 if case .move(let source, let destination) = operation,
-                    relocated == source.path || relocated.hasPrefix(source.path + "/") {
+                    relocated == source.path || relocated.hasPrefix(source.path + "/")
+                {
                     relocated = destination.path + relocated.dropFirst(source.path.count)
                 }
             }
@@ -540,25 +618,53 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 return
             }
             saveDefaultSnapshot(); schedule()
+            if let renameCreated, result.failed.isEmpty,
+                let created = hits.first(where: { $0.path == renameCreated.path })
+            {
+                beginRename(created)
+            }
         }
     }
     func prepareOperations(
-        name: String, _ prepare: @escaping @Sendable () throws -> [FileMutation]
+        name: String, renameCreated: Bool = false,
+        _ prepare: @escaping @Sendable () throws -> [FileMutation]
     ) {
         guard !busy else { return }
         busy = true; error = nil; mutationError = nil
-        Task {
+        operationName = name
+        operationProgress = FileOperationProgress()
+        preparationTask = Task {
             do {
                 let operations = try await BackgroundWork.run(prepare)
+                try Task.checkCancellation()
                 busy = false
-                if operations.isEmpty { schedule() }
-                else { perform(operations, name: name) }
+                operationProgress = nil
+                if operations.isEmpty {
+                    schedule()
+                } else {
+                    let created: URL?
+                    if renameCreated, let first = operations.first {
+                        switch first {
+                        case .folder(let url), .textFile(let url): created = url
+                        default: created = nil
+                        }
+                    } else {
+                        created = nil
+                    }
+                    perform(operations, name: name, renameCreated: created)
+                }
+            } catch is CancellationError {
+                busy = false; operationProgress = nil; schedule()
             } catch {
                 busy = false
+                operationProgress = nil
                 mutationError = error.localizedDescription
                 schedule()
             }
         }
+    }
+    func cancelOperation() {
+        preparationTask?.cancel(); operationControl?.cancel(); resolveConflict(.cancel)
     }
     func beginRename(_ hit: Hit) {
         guard !busy else { return }
@@ -575,7 +681,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         else { error = "Choose a valid filename without slashes or colons."; return false }
         renaming = nil; error = nil
         guard name != hit.name else { return true }
-        perform([.move(hit.url, hit.url.deletingLastPathComponent().appendingPathComponent(name))],
+        perform(
+            [.move(hit.url, hit.url.deletingLastPathComponent().appendingPathComponent(name))],
             name: "Rename")
         return true
     }
@@ -635,6 +742,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     }
     deinit {
         watchTask?.cancel(); task?.cancel(); prefetchTask?.cancel(); orderingTask?.cancel()
+        preparationTask?.cancel(); operationControl?.cancel()
         watchRefresh?.cancel(); watcher?.cancel();
         metadata?.stop();
         if let metadataObserver { NotificationCenter.default.removeObserver(metadataObserver) }
@@ -642,7 +750,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
 }
 
 @MainActor final class BrowserWorkspace: ObservableObject {
-    @Published var tabs: [SearchModel] = [SearchModel()]
+    @Published var tabs: [SearchModel] = [SearchModel()] {
+        didSet { observeSession(); saveSession() }
+    }
     @Published var selectedTab = UUID()
     @Published var favorites: [String] =
         UserDefaults.standard.stringArray(forKey: "favorites") ?? []
@@ -652,12 +762,36 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     private let volumeEjector: @Sendable (URL) async throws -> Void
     private var volumeTask: Task<Void, Never>?
     private var volumeGeneration = 0
+    let sessionDefaults: UserDefaults?
+    var sessionObservers: [AnyCancellable] = []
+    private var terminationObserver: AnyCancellable?
+    var closedTabs: [TabSession] = []
     init(
-        volumeLoader: @escaping @Sendable () async throws -> [MountedVolume] = { try await MountedVolume.load() },
-        volumeEjector: @escaping @Sendable (URL) async throws -> Void = { try await MountedVolume.eject($0) }
+        volumeLoader: @escaping @Sendable () async throws -> [MountedVolume] = {
+            try await MountedVolume.load()
+        },
+        volumeEjector: @escaping @Sendable (URL) async throws -> Void = {
+            try await MountedVolume.eject($0)
+        },
+        sessionDefaults: UserDefaults? = nil
     ) {
         self.volumeLoader = volumeLoader; self.volumeEjector = volumeEjector
-        selectedTab = tabs[0].id; refreshVolumes()
+        self.sessionDefaults = sessionDefaults
+        if let data = sessionDefaults?.data(forKey: WorkspaceSession.key),
+            let state = try? JSONDecoder().decode(WorkspaceSession.self, from: data),
+            !state.tabs.isEmpty, state.tabs.count <= 50
+        {
+            tabs = state.tabs.map { $0.restore() }
+            selectedTab = tabs[min(max(0, state.selectedIndex), tabs.count - 1)].id
+        } else {
+            selectedTab = tabs[0].id
+        }
+        observeSession()
+        terminationObserver = NotificationCenter.default.publisher(
+            for: NSApplication.willTerminateNotification
+        )
+        .sink { [weak self] _ in self?.saveSession() }
+        refreshVolumes()
     }
     var current: SearchModel { tabs.first { $0.id == selectedTab } ?? tabs[0] }
     func newTab(_ location: URL? = nil) {
@@ -666,6 +800,10 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     }
     func closeTab(_ id: UUID) {
         guard tabs.count > 1, tabs.first(where: { $0.id == id })?.busy != true else { return };
+        if let tab = tabs.first(where: { $0.id == id }) {
+            closedTabs.append(TabSession(tab));
+            if closedTabs.count > 20 { closedTabs.removeFirst() }
+        }
         tabs.removeAll { $0.id == id };
         if !tabs.contains(where: { $0.id == selectedTab }) { selectedTab = tabs[0].id }
     }
@@ -684,16 +822,24 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         volumeTask = Task { [weak self] in
             do {
                 let volumes = try await loader()
-                guard !Task.isCancelled, let self, self.volumeGeneration == generation else { return }
+                guard !Task.isCancelled, let self, self.volumeGeneration == generation else {
+                    return
+                }
                 self.volumes = volumes
-            } catch { /* Keep the current locations if a refresh is unavailable. */ }
+            } catch { /* Keep the current locations if a refresh is unavailable. */  }
         }
     }
     func eject(_ volume: MountedVolume, reportError: @escaping (String) -> Void) {
-        guard volume.canEject, volumes.contains(volume), !ejectingVolumes.contains(volume.id) else { return }
-        guard !tabs.contains(where: { tab in
-            tab.busy && (tab.location.path == volume.id || tab.location.path.hasPrefix(volume.id + "/"))
-        }) else {
+        guard volume.canEject, volumes.contains(volume), !ejectingVolumes.contains(volume.id) else {
+            return
+        }
+        guard
+            !tabs.contains(where: { tab in
+                tab.busy
+                    && (tab.location.path == volume.id
+                        || tab.location.path.hasPrefix(volume.id + "/"))
+            })
+        else {
             reportError("Wait for the file operation to finish before ejecting ‘\(volume.name)’.")
             return
         }
@@ -704,7 +850,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             do {
                 try await ejector(volume.url)
                 volumes.removeAll { $0.id == volume.id }
-                for tab in tabs where tab.location.path == volume.id || tab.location.path.hasPrefix(volume.id + "/") {
+                for tab in tabs
+                where tab.location.path == volume.id || tab.location.path.hasPrefix(volume.id + "/")
+                {
                     tab.navigate(URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
                 }
                 refreshVolumes()

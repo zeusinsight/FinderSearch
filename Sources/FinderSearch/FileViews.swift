@@ -3,14 +3,25 @@ import AppKit
 import QuickLookThumbnailing
 import UniformTypeIdentifiers
 
+/// Independent recognizers select on the first click without waiting for the
+/// system double-click interval. Double-clicking still opens the item.
+struct FileClickActions: ViewModifier {
+    let select: () -> Void
+    let open: () -> Void
+    func body(content: Content) -> some View {
+        content.onTapGesture(perform: select)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { open() })
+    }
+}
+
 struct FileIcon: View {
     let hit: Hit
     @State private var image: NSImage?
     var body: some View {
-        Image(nsImage: image ?? FileIcons.shared.placeholder(hit)).resizable()
+        Image(nsImage: image ?? FileIcons.shared.placeholder(hit, size: .row)).resizable()
             .task(id: hit.imageKey) {
                 guard hit.metadataPending != true else { return }
-                guard let loaded = await FileIcons.shared.load(hit) else { return }
+                guard let loaded = await FileIcons.shared.load(hit, size: .row) else { return }
                 guard !Task.isCancelled else { return }
                 image = loaded
             }
@@ -20,11 +31,11 @@ struct FileIcon: View {
 @MainActor final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let images = NSCache<NSString, NSImage>()
-    private init() { images.countLimit = 256; images.totalCostLimit = 64 * 1024 * 1024 }
+    private init() { images.countLimit = 768; images.totalCostLimit = 160 * 1024 * 1024 }
     func key(_ hit: Hit) -> String { hit.path + ":" + String(hit.mtime) + ":" + String(hit.size) }
     func image(_ hit: Hit) -> NSImage? { images.object(forKey: key(hit) as NSString) }
     func store(_ image: NSImage, for hit: Hit) {
-        images.setObject(image, forKey: key(hit) as NSString, cost: 256 * 256 * 4)
+        images.setObject(image, forKey: key(hit) as NSString, cost: ImageRasterizer.cost(image))
     }
 }
 
@@ -42,6 +53,10 @@ struct FileThumbnail: View {
                 guard let icon = await FileIcons.shared.load(hit) else { return }
                 guard !Task.isCancelled else { return }; image = icon
                 guard hit.kind != "dir" else { return }
+                // Cells flung past during fast scrolling disappear before this
+                // settles, so they never start a Quick Look render.
+                try? await Task.sleep(for: .milliseconds(90))
+                guard !Task.isCancelled else { return }
                 let unavailableCloudFile = await Task.detached(priority: .utility) {
                     let values = try? hit.url.resourceValues(forKeys: [
                         .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
@@ -58,7 +73,17 @@ struct FileThumbnail: View {
                     await withCheckedContinuation { continuation in
                         guard completion.start(continuation) else { return }
                         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) {
-                            result, _ in completion.finish(result?.nsImage)
+                            result, _ in
+                            // Decode on Quick Look's queue rather than at first draw.
+                            completion.finish(
+                                result.flatMap {
+                                    ImageRasterizer.decode($0.cgImage, maxPixels: 256)
+                                }
+                                .map {
+                                    NSImage(
+                                        cgImage: $0,
+                                        size: ImageRasterizer.aspectSize($0, points: 128))
+                                })
                         }
                         // Cancellation can race the call that starts generation.
                         if completion.isCancelled { QLThumbnailGenerator.shared.cancel(request) }
@@ -136,17 +161,22 @@ struct GalleryBrowser<RowMenu: View>: View {
                                     in: RoundedRectangle(cornerRadius: 5)
                                 ).contentShape(Rectangle())
                                 .contextMenu { rowMenu(hit) }
-                                .onTapGesture(count: 2) {
-                                    select(hit); model.open(hit)
-                                }.onTapGesture { select(hit) }.draggable(hit.url).modifier(
+                                .modifier(
+                                    FileClickActions(
+                                        select: { select(hit) }, open: { model.open(hit) }
+                                    )
+                                ).draggable(hit.url).modifier(
                                     FolderDropTarget(hit: hit, model: model)
                                 )
+                                .marqueeItem(hit.path, in: model.id)
                                 .id(hit.path)
                         }
-                    }.padding(12)
+                    }.scrollTargetLayout().padding(12)
+                        .marqueeSelection(model: model, focusFiles: {})
                 }.frame(height: 115)
+                    .scrollPosition(id: $model.scrollAnchor)
                     .onChange(of: model.focusedPath) { _, path in
-                        if let path { proxy.scrollTo(path) }
+                        if !model.marqueeSelecting, let path { proxy.scrollTo(path) }
                     }
             }
         }
@@ -154,6 +184,7 @@ struct GalleryBrowser<RowMenu: View>: View {
 }
 struct FileColumn: Identifiable {
     let id = UUID(); let url: URL; var items: [Hit]; var selected: String?
+    var scrollAnchor: String?
 }
 struct ColumnBrowser<RowMenu: View>: View {
     @ObservedObject var model: SearchModel
@@ -171,38 +202,53 @@ struct ColumnBrowser<RowMenu: View>: View {
                             {
                                 FolderLoadingSkeleton(mode: .columns)
                             } else {
-                                List(
-                                    column.items,
-                                    selection: Binding(
-                                        get: {
-                                            columns.indices.contains(index)
-                                                ? columns[index].selected : nil
-                                        },
-                                        set: { path in
-                                            if let path,
-                                                let hit = column.items.first(where: {
-                                                    $0.path == path
-                                                })
-                                            {
-                                                pick(hit, at: index)
-                                            }
-                                        })
-                                ) { hit in
-                                    HStack(spacing: 6) {
-                                        FileIcon(hit: hit).frame(width: 16, height: 16);
-                                        FileNameLabel(model: model, hit: hit);
-                                        Spacer(minLength: 2);
-                                        if hit.isFolder {
-                                            Image(systemName: "chevron.right").font(
-                                                .system(size: 9)
-                                            ).foregroundStyle(.secondary)
+                                ScrollView(.vertical) {
+                                    LazyVStack(spacing: 0) {
+                                        ForEach(column.items) { hit in
+                                            HStack(spacing: 6) {
+                                                FileIcon(hit: hit).frame(width: 16, height: 16);
+                                                FileNameLabel(model: model, hit: hit);
+                                                Spacer(minLength: 2);
+                                                if hit.isFolder {
+                                                    Image(systemName: "chevron.right").font(
+                                                        .system(size: 9)
+                                                    ).foregroundStyle(.secondary)
+                                                }
+                                            }.frame(maxWidth: .infinity).contentShape(Rectangle())
+                                                .tag(
+                                                    hit.path
+                                                ).contextMenu { rowMenu(hit) }.draggable(hit.url)
+                                                .modifier(
+                                                    FolderDropTarget(hit: hit, model: model)
+                                                ).modifier(
+                                                    ColumnOpenGesture(hit: hit, model: model)
+                                                )
+                                                .frame(height: 24).padding(.horizontal, 8)
+                                                .background(
+                                                    columns.indices.contains(index)
+                                                        && columns[index].selected == hit.path
+                                                        ? Color.accentColor.opacity(0.22)
+                                                        : Color.clear
+                                                )
+                                                .onTapGesture { pick(hit, at: index) }
+                                                .id(hit.path)
                                         }
-                                    }.frame(maxWidth: .infinity).contentShape(Rectangle()).tag(
-                                        hit.path
-                                    ).contextMenu { rowMenu(hit) }.draggable(hit.url).modifier(
-                                        FolderDropTarget(hit: hit, model: model)
-                                    ).modifier(ColumnOpenGesture(hit: hit, model: model))
-                                }.listStyle(.plain)
+                                    }.scrollTargetLayout()
+                                }.scrollPosition(
+                                    id: Binding(
+                                        get: {
+                                            column.url.path == model.location.path
+                                                ? model.scrollAnchor
+                                                : columns.indices.contains(index)
+                                                    ? columns[index].scrollAnchor : nil
+                                        },
+                                        set: { anchor in
+                                            guard columns.indices.contains(index) else { return }
+                                            columns[index].scrollAnchor = anchor
+                                            if column.url.path == model.location.path {
+                                                model.scrollAnchor = anchor
+                                            }
+                                        }))
                             }
                         }.frame(width: 235).id(column.id)
                         Divider()
@@ -226,14 +272,24 @@ struct ColumnBrowser<RowMenu: View>: View {
         .onChange(of: model.sortedHits) { _, _ in
             if let index = columns.firstIndex(where: { $0.url.path == model.location.path }) {
                 columns[index].items = model.sortedHits
-                if let selected = columns[index].items.first(where: { model.selection.contains($0.path) }) {
+                if let selected = columns[index].items.first(where: {
+                    model.selection.contains($0.path)
+                }) {
                     columns[index].selected = selected.path
                 } else if let selected = columns[index].selected,
-                    !columns[index].items.contains(where: { $0.path == selected }) {
+                    !columns[index].items.contains(where: { $0.path == selected })
+                {
                     columns[index].selected = nil
                 }
                 model.extraHits = columns.flatMap(\.items)
             }
+        }
+        .onChange(of: model.focusedPath) { _, path in
+            guard let path,
+                let index = columns.lastIndex(where: { $0.url.path == model.location.path }),
+                let hit = columns[index].items.first(where: { $0.path == path })
+            else { return }
+            pick(hit, at: index)
         }
         .task(id: model.location) {
             guard lastNavigation?.path != model.location.path else { return }
@@ -260,7 +316,7 @@ struct ColumnBrowser<RowMenu: View>: View {
     }
 }
 
-/// Column folders navigate through native selection on the first click. A
+/// Column folders navigate on the first click. A
 /// double-tap recognizer on those rows delays selection while it waits.
 private struct ColumnOpenGesture: ViewModifier {
     let hit: Hit
@@ -290,9 +346,18 @@ struct FolderDropTarget: ViewModifier {
                 }
             }
             .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
+                model.springLoader.cancel()
                 guard hit.isFolder else { return false }
                 return FileDrops.accept(providers, into: hit.url, model: model)
             }
+            .onChange(of: targeted) { _, active in
+                if active && hit.isFolder {
+                    model.hoverFolder(hit.url)
+                } else {
+                    model.springLoader.leave(hit.url)
+                }
+            }
+            .onDisappear { if targeted { model.springLoader.leave(hit.url) } }
     }
 }
 @MainActor enum FileDrops {

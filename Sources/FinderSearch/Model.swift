@@ -736,9 +736,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     }
     @discardableResult func commitRename(_ name: String) -> Bool {
         guard !busy, let hit = renaming else { return false }
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
-            !name.contains(":"), !name.contains("\0")
-        else { error = "Choose a valid filename without slashes or colons."; return false }
+        if let problem = FileName.problem(name) { error = problem; return false }
         renaming = nil; error = nil
         guard name != hit.name else { return true }
         perform(

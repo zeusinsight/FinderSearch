@@ -91,9 +91,10 @@ Apple Silicon; Intel and installation on a second Mac remain unverified.
 ## Still early
 
 This is a file browser, not a replacement for the macOS shell. No AirDrop,
-Finder extensions, saved smart folders, batch rename, or persistent session/undo
-history yet. Content search isn't exposed in the UI. File conflicts refuse
-overwrites; there is no merge dialog. Slow disks and cloud providers can still take time.
+Finder extensions, saved smart folders, or persistent undo history yet. Tabs and
+browsing sessions restore on relaunch. Content search isn't exposed in the UI.
+File conflicts offer Replace, Keep Both, or Skip; folder merging isn't supported.
+Slow disks and cloud providers can still take time.
 
 ## Development
 

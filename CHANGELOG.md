@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 — 2026-10-10
 
 - **Faster folder loading:** bulk metadata reads are ~14× faster for regular files and ~36× faster for APFS subfolders; subfolder listing plus sorting is ~8× faster.
 - **Faster sorting:** reuse filename order after metadata refreshes (~15×) and reverse valid cached order when changing direction (~21–71×).

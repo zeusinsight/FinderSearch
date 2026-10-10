@@ -11,9 +11,9 @@ use crate::walk;
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 // Every search scans the whole overlay (~1 ms per 100k entries), and a
@@ -29,6 +29,9 @@ const CONTENT_MAX_WAIT: Duration = Duration::from_secs(300);
 const FOLLOW_EVERY: Duration = Duration::from_secs(10);
 /// Seconds before the last known-good moment that a relist also covers.
 const SYNC_MARGIN: u32 = 120;
+/// How long FSEvents must go without dropping events before the gap is
+/// replayed: restarting mid-burst only drops more.
+const REPLAY_QUIET: Duration = Duration::from_secs(2);
 
 pub struct Options {
     /// Where the index lives (`index.bin`, `content/`).
@@ -76,15 +79,17 @@ pub struct Engine {
 
 struct Shared {
     live: RwLock<Option<Live>>,
+    /// A saved index is still being read in: searches wait for it rather
+    /// than answer "indexing".
+    loading: (Mutex<bool>, Condvar),
     content: RwLock<Content>,
     home: String,
     dir: PathBuf,
     /// Wakes the apply loop; an empty batch is a no-op wake-up.
     wake: Sender<Vec<fsevents::Event>>,
     save_requested: AtomicBool,
-    /// (dirs, trees) for the content worker to re-sync.
-    content_tx: Sender<(Vec<Vec<u8>>, Vec<Vec<u8>>)>,
-    content_rx: Mutex<Option<Receiver<(Vec<Vec<u8>>, Vec<Vec<u8>>)>>>,
+    content_tx: Sender<Resync>,
+    content_rx: Mutex<Option<Receiver<Resync>>>,
     content_pending: AtomicUsize,
     /// Holding `lock`: this engine writes the index files. Another process
     /// may own them (the daemon, an app); then this one follows: it reads
@@ -93,6 +98,10 @@ struct Shared {
     owner: AtomicBool,
     lock: std::fs::File,
     stream: Mutex<Option<fsevents::Stream>>,
+    /// Number of the current stream (events carry the one they came from)
+    /// and the event id it started from.
+    streams: std::sync::atomic::AtomicU32,
+    since: AtomicU64,
     /// The stream is still replaying history (until HISTORY_DONE).
     replaying: AtomicBool,
     /// Follower: content dir mtime when its segments were last opened.
@@ -132,6 +141,41 @@ fn search_pool() -> &'static rayon::ThreadPool {
     })
 }
 
+/// The keep-warm window: spin from `WARM_FROM` to `WARM_UNTIL` (`now_ns`).
+static WARM_FROM: AtomicU64 = AtomicU64::new(0);
+static WARM_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// The warmer is parked until the next `keep_warm`.
+static WARM_IDLE: AtomicBool = AtomicBool::new(false);
+
+fn now_ns() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+fn warmer() -> &'static std::thread::Thread {
+    static T: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let t = std::thread::Builder::new().name("fsearch-warm".into()).spawn(|| {
+            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
+            loop {
+                let (from, until, now) = (WARM_FROM.load(Ordering::SeqCst), WARM_UNTIL.load(Ordering::SeqCst), now_ns());
+                if now >= until {
+                    WARM_IDLE.store(true, Ordering::SeqCst);
+                    if now_ns() >= WARM_UNTIL.load(Ordering::SeqCst) {
+                        std::thread::park();
+                    }
+                    WARM_IDLE.store(false, Ordering::SeqCst);
+                } else if now < from {
+                    std::thread::park_timeout(Duration::from_nanos(from - now));
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+        t.expect("spawn").thread().clone()
+    })
+}
+
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .name(name.into())
@@ -143,8 +187,9 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 impl Engine {
-    /// Start indexing in the background and return at once; searches answer
-    /// `Err` until the index is loaded (or, on the very first run, built).
+    /// Start indexing in the background and return at once. Searches wait
+    /// while a saved index loads, and answer `Err` while the very first run
+    /// builds one.
     pub fn start(opts: Options) -> Result<Engine, String> {
         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
         // One writer per index: a second one would race index writes. The
@@ -163,11 +208,18 @@ impl Engine {
             let _ = walk::SKIP.set(skip);
         }
         let dir = opts.dir;
+        // Read a saved index in (Live::new faults its arrays in) while the
+        // rest starts up: opening content and FSEvents take ms, tens from disk.
+        let loading = Index::load(&dir.join("index.bin")).map(|b| {
+            let (n, event_id) = (b.n, b.event_id);
+            (n, event_id, std::thread::spawn(move || Live::new(b)))
+        });
         let (tx, rx) = std::sync::mpsc::channel();
         let (ctx, crx) = std::sync::mpsc::channel();
         let content = if owner { Content::open(dir.join("content")) } else { Content::open_shared(dir.join("content")) };
         let shared = Arc::new(Shared {
             live: RwLock::new(None),
+            loading: (Mutex::new(loading.is_some()), Condvar::new()),
             content: RwLock::new(content),
             home: opts.home,
             dir,
@@ -179,13 +231,14 @@ impl Engine {
             owner: AtomicBool::new(owner),
             lock,
             stream: Mutex::new(None),
+            streams: Default::default(),
+            since: AtomicU64::new(0),
             replaying: AtomicBool::new(true),
             content_seen: Mutex::new(None),
         });
-        let base = Index::load(&shared.dir.join("index.bin"));
-        let since = match &base {
-            Some(b) if b.event_id != 0 => b.event_id,
-            _ => unsafe { fsevents::FSEventsGetCurrentEventId() },
+        let since = match &loading {
+            Some((_, event_id, _)) if *event_id != 0 => *event_id,
+            _ => fsevents::current_id(),
         };
         if owner {
             // Watch before scanning so nothing that changes mid-scan is
@@ -194,24 +247,27 @@ impl Engine {
         }
         let s = shared.clone();
         spawn("fsearch-apply", move || {
-            let base = match base {
-                Some(b) => {
-                    log(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
+            let live = match loading {
+                Some((n, event_id, read_in)) => {
+                    log(format!("loaded {n} entries, replaying events since {event_id}"));
                     if !owner {
-                        s.watch(b.event_id);
+                        s.watch(event_id);
                     }
-                    b
+                    read_in.join().expect("load index")
                 }
-                None if owner => full_build(&s, since),
+                None if owner => Live::new(full_build(&s, since)),
                 None => {
                     // The owner is building it; follow once it exists.
                     let b = wait_for_index(&s.dir);
                     s.watch(b.event_id);
-                    b
+                    Live::new(b)
                 }
             };
-            *s.live.write().unwrap() = Some(Live::new(base));
+            *s.live.write().unwrap() = Some(live);
+            *s.loading.0.lock().unwrap() = false;
+            s.loading.1.notify_all();
             if owner {
+                rescan_unskipped(&s);
                 start_content(&s);
             }
             apply_loop(&s, rx);
@@ -223,10 +279,27 @@ impl Engine {
         &self.s.home
     }
 
+    /// Keep the cores clocked up for `d` from now. After ~20 ms idle macOS
+    /// slows them down, and a search then runs 3-6x slower while they ramp
+    /// back up; one spinning thread keeps them up, so the next keystroke's
+    /// search starts fast. The spinning stops when a search starts (the
+    /// search keeps the cores busy itself) and when `d` runs out.
+    pub fn keep_warm(&self, d: Duration) {
+        let w = warmer();
+        let now = now_ns();
+        // They stay up for the first few ms anyway.
+        WARM_FROM.store(now + 2_000_000, Ordering::SeqCst);
+        WARM_UNTIL.store(now + d.as_nanos() as u64, Ordering::SeqCst);
+        if WARM_IDLE.load(Ordering::SeqCst) {
+            w.unpark();
+        }
+    }
+
     /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
-        let g = self.s.live.read().unwrap();
-        let Some(live) = g.as_ref() else { return Err(INDEXING.into()) };
+        WARM_UNTIL.store(0, Ordering::Relaxed);
+        let g = self.s.live();
+        let Some(live) = g.as_ref() else { return Err(indexing()) };
         let mut p = Vec::new();
         Ok(search_pool()
             .install(|| Searcher { live }.search(q))
@@ -253,16 +326,19 @@ impl Engine {
     /// The bool says whether the content index answered (false: files were
     /// picked from the name index and read, for folders it doesn't cover).
     pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
+        WARM_UNTIL.store(0, Ordering::Relaxed);
         let home = self.s.home.as_bytes();
         let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
         if indexed {
-            return Ok((search_pool().install(|| self.s.content.read().unwrap().search(g, q)), true));
+            // Content search brings its own reader threads; running it here
+            // skips waking a pool thread just to hand the work over.
+            return Ok((self.s.content.read().unwrap().search(g, q), true));
         }
         // Pick files under the lock, read them after releasing it: reading can
         // be slow and a waiting writer would stall every other query.
         let paths = {
-            let l = self.s.live.read().unwrap();
-            let Some(live) = l.as_ref() else { return Err(INDEXING.into()) };
+            let l = self.s.live();
+            let Some(live) = l.as_ref() else { return Err(indexing()) };
             search_pool().install(|| content::scan_paths(live, q.clone_for_scan()))
         };
         Ok((content::verify(g, &paths, q.limit), false))
@@ -288,6 +364,11 @@ impl Engine {
         }
     }
 
+    /// The answer while the first index builds, with its progress.
+    pub fn indexing(&self) -> String {
+        indexing()
+    }
+
     /// Compact and save the name index soon (on the background thread).
     pub fn save(&self) {
         self.s.save_requested.store(true, Ordering::Relaxed);
@@ -295,9 +376,22 @@ impl Engine {
     }
 }
 
-const INDEXING: &str = "indexing (first run scans the whole disk, ~20s)";
+/// (dirs, trees) for the content worker to re-sync.
+type Resync = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// The answer while the first index builds, with its progress.
+fn indexing() -> String {
+    let n = walk::LISTED.load(Ordering::Relaxed);
+    format!("indexing: {:.1}M entries so far (the first run lists the whole disk, ~25s)", n as f64 / 1e6)
+}
 
 impl Shared {
+    fn live(&self) -> RwLockReadGuard<'_, Option<Live>> {
+        let (loading, cv) = &self.loading;
+        drop(cv.wait_while(loading.lock().unwrap(), |l| *l).unwrap());
+        self.live.read().unwrap()
+    }
+
     fn owner(&self) -> bool {
         self.owner.load(Ordering::Relaxed)
     }
@@ -305,7 +399,9 @@ impl Shared {
     /// (Re)start the FSEvents stream from `since`, replacing any old one.
     fn watch(&self, since: u64) {
         self.replaying.store(true, Ordering::Relaxed);
-        let new = fsevents::watch(since, 0.1, self.wake.clone());
+        self.since.store(since, Ordering::Relaxed);
+        let n = self.streams.fetch_add(1, Ordering::Relaxed) + 1;
+        let new = fsevents::watch(since, 0.1, self.wake.clone(), n);
         *self.stream.lock().unwrap() = Some(new);
     }
 
@@ -334,9 +430,6 @@ impl Shared {
 
 fn start_content(s: &Arc<Shared>) {
     let Some(rx) = s.content_rx.lock().unwrap().take() else { return };
-    // Reconcile all of home once (cheap when nothing changed), then follow
-    // along with the name index's changes.
-    let _ = s.content_tx.send((Vec::new(), vec![s.home.as_bytes().to_vec()]));
     let s = s.clone();
     spawn("fsearch-content", move || content_loop(&s, rx));
 }
@@ -352,8 +445,54 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
     s.owner.store(true, Ordering::Relaxed);
     log("took over the index from a previous owner");
     *s.content.write().unwrap() = Content::open(s.dir.join("content"));
+    rescan_unskipped(s);
     start_content(s);
     true
+}
+
+/// Next to index.bin: the folders it lacks for want of access, one per
+/// line (skipped, or refused by macOS).
+const SKIPPED: &str = "skipped";
+
+fn note_skipped(dir: &Path) {
+    let mut out = Vec::new();
+    for p in walk::SKIP.get().into_iter().flatten().chain(walk::DENIED.lock().unwrap().iter()) {
+        out.extend_from_slice(p);
+        out.push(b'\n');
+    }
+    if let Err(e) = std::fs::write(dir.join(SKIPPED), out) {
+        log(format!("save failed: {e}"));
+    }
+}
+
+/// Full Disk Access granted since the save: the folders it lacked stay
+/// missing, since no FSEvents replay brings them back. Rescan them like a
+/// must-scan-subdirs event would; ones still refused carry over to the next
+/// save. (A save from before this was recorded rescans the gated folders.)
+fn rescan_unskipped(shared: &Shared) {
+    let was: Vec<Vec<u8>> = match std::fs::read(shared.dir.join(SKIPPED)) {
+        Ok(b) => b.split(|&c| c == b'\n').filter(|l| !l.is_empty()).map(<[u8]>::to_vec).collect(),
+        Err(_) => gated(&shared.home),
+    };
+    let mut now = Vec::new();
+    for path in was {
+        if walk::blocked(&path) {
+            continue;
+        }
+        let readable = std::fs::read_dir(std::ffi::OsStr::from_bytes(&path)).map_or_else(|e| e.raw_os_error() != Some(libc::EPERM), |_| true);
+        if readable {
+            now.push(fsevents::Event { path, flags: MUST_SCAN_SUBDIRS, id: 0, stream: 0 });
+        } else {
+            walk::DENIED.lock().unwrap().push(path);
+        }
+    }
+    if now.is_empty() {
+        return;
+    }
+    log(format!("rescanning {} folders the saved index lacked", now.len()));
+    let _ = shared.wake.send(now);
+    // Saved soon, so the next start doesn't rescan them again.
+    shared.save_requested.store(true, Ordering::Relaxed);
 }
 
 fn wait_for_index(dir: &Path) -> Index {
@@ -382,19 +521,26 @@ pub fn has_full_disk_access() -> bool {
     std::fs::File::open("/Library/Application Support/com.apple.TCC/TCC.db").is_ok()
 }
 
-fn content_loop(shared: &Shared, rx: Receiver<(Vec<Vec<u8>>, Vec<Vec<u8>>)>) {
-    // Indexing file contents is background work: utility QoS keeps it off
-    // the user's way (lower CPU priority and IO tier).
-    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .start_handler(|_| unsafe {
-            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+fn content_pool(threads: usize, qos: libc::qos_class_t) -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(move |_| unsafe {
+            libc::pthread_set_qos_class_self_np(qos, 0);
             no_materialize();
         })
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
+    // Indexing file contents is background work: utility QoS keeps it off
+    // the user's way (lower CPU priority and IO tier).
+    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+    let pool = content_pool(4, libc::qos_class_t::QOS_CLASS_UTILITY);
     let home = shared.home.as_bytes().to_vec();
+    // Reconcile all of home once, right away (cheap when nothing changed),
+    // then follow along with the name index's changes.
+    sync(shared, &pool, &home, &[], std::slice::from_ref(&home));
     // Per-folder debounce: a folder is processed 2s after its last change,
     // or 5 min after its first pending one if it never goes quiet. A file you
     // save lands in ~2s; files apps rewrite every second (state, logs) cost
@@ -430,52 +576,105 @@ fn content_loop(shared: &Shared, rx: Receiver<(Vec<Vec<u8>>, Vec<Vec<u8>>)>) {
             pending.remove(&k);
             if k.1 { trees.push(k.0) } else { dirs.push(k.0) }
         }
-        let t = Instant::now();
-        let wants = {
-            let g = shared.live.read().unwrap();
-            let Some(live) = g.as_ref() else { continue };
-            content::wants(live, &home, &dirs, &trees)
-        };
-        let todo = shared.content.write().unwrap().diff(wants);
-        if todo.len() == 0 {
-            continue;
-        }
-        let n = todo.len();
-        shared.content_pending.store(n, Ordering::Relaxed);
-        for batch in todo.batches() {
-            let (dir, id) = {
-                let mut c = shared.content.write().unwrap();
-                (c.dir.clone(), c.alloc_id())
-            };
-            let len = batch.len();
-            if let Some(seg) = pool.install(|| content::build_segment(&dir, id, &todo, batch)) {
-                shared.content.write().unwrap().push(seg);
-            }
-            shared.content_pending.fetch_sub(len, Ordering::Relaxed);
-        }
-        drop(todo);
-        // Keep the segment count small: merge size tiers of 8.
-        loop {
-            let plan = shared.content.read().unwrap().merge_plan();
-            let Some(ids) = plan else { break };
-            let (dir, id) = {
-                let mut c = shared.content.write().unwrap();
-                (c.dir.clone(), c.alloc_id())
-            };
-            let merged = {
-                let c = shared.content.read().unwrap();
-                pool.install(|| content::merge(&dir, id, &c.segments(&ids)))
-            };
-            match merged {
-                Some(seg) => shared.content.write().unwrap().replace(&ids, seg),
-                None => break,
-            }
-        }
-        if n > 100 {
-            log(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
-        }
-        release_memory();
+        sync(shared, &pool, &home, &dirs, &trees);
     }
+}
+
+/// Bring the content index in line with the name index for these folders
+/// (direct children) and trees.
+fn sync(shared: &Shared, pool: &rayon::ThreadPool, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) {
+    let t = Instant::now();
+    let wants = {
+        let g = shared.live.read().unwrap();
+        let Some(live) = g.as_ref() else { return };
+        content::wants(live, home, dirs, trees)
+    };
+    let (first, todo) = {
+        let mut c = shared.content.write().unwrap();
+        (c.segs.is_empty(), c.diff(wants))
+    };
+    if todo.is_empty() {
+        return;
+    }
+    let n = todo.len();
+    shared.content_pending.store(n, Ordering::Relaxed);
+    // A first build (fresh install, format change) is a one-time wait the
+    // user is watching: 8 threads at user-initiated QoS, and two batches in
+    // flight, so one's single-threaded parts (a run of big files, the
+    // segment write) run beside the other's reads. Each thread keeps its
+    // next files opened ahead, and past 8 threads those opens only contend
+    // in the kernel. Measured on HOME (730k files, M4 Max, with
+    // speed-content's open-ahead build): 99-155 s on the 4 utility threads;
+    // 8 threads 17.2-17.5 s (61 s system CPU), 12 threads 22.0-24.3 s, 16
+    // threads 27.2-30.1 s (250-300 s system CPU). A third batch in flight
+    // (16.3-17.2 s) would add ~70 MB to the ~650 MB peak.
+    let fast;
+    let (pool, inflight) = if first {
+        let threads = std::thread::available_parallelism().map_or(8, |n| n.get()).min(8);
+        fast = content_pool(threads, libc::qos_class_t::QOS_CLASS_USER_INITIATED);
+        (&fast, 2)
+    } else {
+        (pool, 1)
+    };
+    build_batches(shared, pool, &todo, inflight);
+    drop(todo);
+    // Keep the segment count small: merge size tiers of 8.
+    loop {
+        let plan = shared.content.read().unwrap().merge_plan();
+        let Some(ids) = plan else { break };
+        let (dir, id) = {
+            let mut c = shared.content.write().unwrap();
+            (c.dir.clone(), c.alloc_id())
+        };
+        let merged = {
+            let c = shared.content.read().unwrap();
+            pool.install(|| content::merge(&dir, id, &c.segments(&ids)))
+        };
+        match merged {
+            Some(seg) => shared.content.write().unwrap().replace(&ids, seg),
+            None => break,
+        }
+    }
+    if n > 100 {
+        log(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
+    }
+    release_memory();
+}
+
+/// Build `todo` into segments, `inflight` batches at a time. Each is pushed
+/// once it and every batch before it are done: the same segments in the
+/// same order as building them one by one.
+fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs, inflight: usize) {
+    let batches = todo.batches();
+    let (dir, ids): (PathBuf, Vec<u64>) = {
+        let mut c = shared.content.write().unwrap();
+        (c.dir.clone(), batches.iter().map(|_| c.alloc_id()).collect())
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    pool.in_place_scope(|s| {
+        let mut done: Vec<Option<Option<content::Segment>>> = (0..batches.len()).map(|_| None).collect();
+        let (mut started, mut finished, mut next) = (0, 0, 0);
+        while next < batches.len() {
+            while started < batches.len() && started - finished < inflight {
+                let (tx, dir, range, id, k) = (tx.clone(), &dir, batches[started].clone(), ids[started], started);
+                s.spawn(move |_| {
+                    let seg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| content::build_segment(dir, id, todo, range)));
+                    let _ = tx.send((k, seg));
+                });
+                started += 1;
+            }
+            let (k, seg) = rx.recv().expect("every build sends");
+            finished += 1;
+            done[k] = Some(seg.unwrap_or_else(|p| std::panic::resume_unwind(p)));
+            while let Some(seg) = done.get_mut(next).and_then(Option::take) {
+                if let Some(seg) = seg {
+                    shared.content.write().unwrap().push(seg);
+                }
+                shared.content_pending.fetch_sub(batches[next].len(), Ordering::Relaxed);
+                next += 1;
+            }
+        }
+    });
 }
 
 fn full_build(shared: &Shared, event_id: u64) -> Index {
@@ -487,6 +686,7 @@ fn full_build(shared: &Shared, event_id: u64) -> Index {
     if let Err(e) = idx.save(&path) {
         log(format!("save failed: {e}"));
     }
+    note_skipped(&shared.dir);
     log(format!("indexed {} entries in {:.2?}", idx.n, t.elapsed()));
     release_memory();
     // Re-map from the file so the index is clean, evictable page cache
@@ -516,6 +716,7 @@ fn compact(shared: &Shared) {
     if let Err(e) = idx.save(&path) {
         log(format!("save failed: {e}"));
     }
+    note_skipped(&shared.dir);
     let idx = Index::load(&path).unwrap_or(idx);
     let n = idx.n;
     *shared.live.write().unwrap() = Some(Live::new(idx));
@@ -565,8 +766,13 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
     let mut last_save = Instant::now();
     let mut last_follow = Instant::now();
     let ours = shared.dir.as_os_str().as_bytes();
+    // Events fseventsd dropped before we read them: (replay from, last drop).
+    let mut gap: Option<(u64, Instant)> = None;
+    // Replays in a row that dropped again; the third falls back to a relist.
+    let mut replays = 0;
     loop {
-        let mut events = match rx.recv_timeout(Duration::from_secs(60)) {
+        let wait = if gap.is_some() { Duration::from_millis(250) } else { Duration::from_secs(60) };
+        let mut events = match rx.recv_timeout(wait) {
             Ok(b) => b,
             Err(RecvTimeoutError::Timeout) => Vec::new(),
             Err(RecvTimeoutError::Disconnected) => return,
@@ -575,22 +781,42 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         // The owner wrote the index files: a follower picks that up now
         // rather than at its next periodic check.
         let owner_wrote = events.iter().any(|e| e.path.starts_with(ours));
-        if !events.is_empty() {
+        let (mut rebuild, mut root_flags, had_events) = (false, 0, !events.is_empty());
+        if had_events {
             let mut dirs: HashMap<Vec<u8>, bool> = HashMap::new();
-            let (mut max_id, mut root_flags) = (0, 0);
+            let mut max_id = 0;
+            let mut last_good = shared.live.read().unwrap().as_ref().map_or(0, |l| l.event_id);
+            let current = shared.streams.load(Ordering::Relaxed);
             for e in events {
-                max_id = max_id.max(e.id);
                 if e.path == b"/" && e.flags & MUST_SCAN_SUBDIRS != 0 {
+                    // fseventsd still logged what it dropped for us (a kernel
+                    // drop never reached it): replay from the last event we
+                    // did get, once the drops stop; a drop during a replay
+                    // starts that replay over. A replaced stream's drop is
+                    // covered by the stream that replaced it.
+                    if e.flags & (USER_DROPPED | KERNEL_DROPPED) == USER_DROPPED {
+                        if e.stream == current {
+                            let from = if shared.replaying.load(Ordering::Relaxed) { shared.since.load(Ordering::Relaxed) } else { last_good };
+                            gap = Some((gap.map_or(from, |(g, _)| g.min(from)), Instant::now()));
+                        }
+                        continue;
+                    }
                     root_flags |= e.flags;
+                }
+                max_id = max_id.max(e.id);
+                if gap.is_none() {
+                    last_good = last_good.max(e.id);
                 }
                 if e.flags & HISTORY_DONE != 0 {
                     log("replay done");
                     shared.replaying.store(false, Ordering::Relaxed);
+                    if gap.is_none() {
+                        replays = 0;
+                    }
                     continue;
                 }
                 *dirs.entry(crate::live::normalize(&e.path)).or_default() |= e.flags & MUST_SCAN_SUBDIRS != 0;
             }
-            let mut rebuild = false;
             let mut trees = Vec::new();
             // Read the disk under the read lock, then apply in memory: a
             // search never waits on a folder listing or a new subtree's scan.
@@ -607,24 +833,34 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                         rebuild = true;
                     }
                 }
-                live.event_id = live.event_id.max(max_id);
+                // With a gap, everything is applied only up to its start.
+                live.event_id = match gap {
+                    Some((from, _)) => live.event_id.min(from),
+                    None => live.event_id.max(max_id),
+                };
                 trees.append(&mut live.trees);
             }
             let (rec, flat): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|(_, r)| *r);
             trees.extend(rec.into_iter().map(|(p, _)| p));
             let _ = shared.content_tx.send((flat.into_iter().map(|(p, _)| p).collect(), trees));
-            if rebuild {
-                let why = match root_flags {
-                    f if f & KERNEL_DROPPED != 0 => "kernel dropped events",
-                    f if f & USER_DROPPED != 0 => "events dropped before we read them",
-                    _ => "history unavailable",
-                };
-                relist_changed(shared, why, root_flags);
-            } else if !shared.replaying.load(Ordering::Relaxed) {
-                // Everything up to this batch is applied (a change's event can
-                // trail it by the stream latency; relisting keeps a margin).
-                shared.live.write().unwrap().as_mut().unwrap().synced_at = crate::query::now_secs();
-            }
+        }
+        let replay = gap.filter(|(_, at)| at.elapsed() >= REPLAY_QUIET).map(|(from, _)| from);
+        if rebuild || (replay.is_some() && replays >= 3) {
+            let why = match root_flags {
+                f if f & KERNEL_DROPPED != 0 => "kernel dropped events",
+                0 => "events dropped again while replaying",
+                _ => "history unavailable",
+            };
+            relist_changed(shared, why, root_flags);
+            (gap, replays) = (None, 0);
+        } else if let Some(from) = replay {
+            log(format!("FSEvents dropped events before we read them: replaying from {from}"));
+            shared.watch(from);
+            (gap, replays) = (None, replays + 1);
+        } else if had_events && gap.is_none() && !shared.replaying.load(Ordering::Relaxed) {
+            // Everything up to this batch is applied (a change's event can
+            // trail it by the stream latency; relisting keeps a margin).
+            shared.live.write().unwrap().as_mut().unwrap().synced_at = crate::query::now_secs();
         }
         if let Some(l) = shared.live.read().unwrap().as_ref() {
             l.names_cache.trim_if_idle(Duration::from_secs(60));

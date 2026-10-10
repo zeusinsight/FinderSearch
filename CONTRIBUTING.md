@@ -39,6 +39,12 @@ For real engine integration, launch the app, wait for indexing, then run:
 python3 scripts/verify_engine.py
 ```
 
+When updating fsearch, verify the daemon itself is running the new binary:
+`stdio` clients connect to a shared daemon that can outlive the app. Quit old app
+instances and restart the FinderSearch-owned daemon before integration checks;
+a Mac restart also clears an old daemon. New index formats rebuild automatically.
+Keep the vendored source identical to the pinned upstream revision.
+
 Tests create isolated files. The engine checks need a running daemon and permission
 to index the current user's home folder. Check affected native interactions manually,
 especially keyboard focus, search clearing, selection, and drag/drop.

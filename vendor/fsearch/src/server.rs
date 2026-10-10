@@ -2,7 +2,7 @@
 //! `fsearch stdio` and the CLI are thin clients.
 
 use fsearch::walk::{KIND_DIR, KIND_FILE, KIND_LINK};
-use fsearch::{Engine, GrepMode, Options, Query};
+use fsearch::{Engine, Found, GrepMode, Options, Query};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -17,11 +17,14 @@ pub fn serve(dir: PathBuf, home: String) {
     // One daemon per socket. (The engine's own lock decides who writes the
     // index: an app embedding fsearch may own it while the daemon follows.)
     std::fs::create_dir_all(&dir).ok();
-    let Ok(lock) = std::fs::File::create(dir.join("socket.lock")) else { return };
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // Opened without truncating: a loser must not wipe the owner's pid.
+    let Ok(mut lock) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("socket.lock")) else { return };
+    if !try_lock(&lock) {
         eprintln!("{} another fsearch daemon is running", fsearch::query::now_secs());
         return;
     }
+    // The pid lets `stop` find us.
+    let _ = lock.set_len(0).and_then(|_| write!(lock, "{}", std::process::id()));
     let engine = match Engine::start(Options { dir: dir.clone(), home, skip: None }) {
         Ok(e) => e,
         Err(e) => {
@@ -38,74 +41,149 @@ pub fn serve(dir: PathBuf, home: String) {
     }
 }
 
-fn handle(conn: UnixStream, engine: &Engine) {
+fn try_lock(f: &std::fs::File) -> bool {
+    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Stop the daemon serving `dir`, if one is running, and wait until it has
+/// let go of the socket lock. One already on its way out (say, after a
+/// launchd bootout) is just waited for.
+pub fn stop(dir: &Path) -> Result<(), String> {
+    let path = dir.join("socket.lock");
+    let Ok(lock) = std::fs::File::open(&path) else { return Ok(()) };
+    let mut killed = None;
+    for _ in 0..300 {
+        if try_lock(&lock) {
+            return Ok(());
+        }
+        if killed.is_none() {
+            killed = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<i32>().ok()).filter(|&p| p > 1);
+            if let Some(pid) = killed {
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(match killed {
+        Some(pid) => format!("daemon {pid} did not exit"),
+        None => "a daemon is running but did not record its pid; stop it by hand".into(),
+    })
+}
+
+/// How long the cores stay clocked up after an answer to a client that is
+/// still connected (typing): most gaps between keystrokes are shorter.
+const WARM: Duration = Duration::from_millis(250);
+
+fn handle(mut conn: UnixStream, engine: &Engine) {
+    // Content searches run on this thread: keep them on performance cores.
+    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
     let Ok(r) = conn.try_clone() else { return };
-    let mut w = std::io::BufWriter::new(conn);
+    let mut out = Vec::new();
     for line in BufReader::new(r).lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() {
             continue;
         }
-        let resp = respond(&line, engine);
-        if writeln!(w, "{resp}").and_then(|_| w.flush()).is_err() {
+        out.clear();
+        respond(&line, engine, &mut out);
+        if conn.write_all(&out).is_err() {
             return;
+        }
+        if waiting(&conn) {
+            engine.keep_warm(WARM);
         }
     }
 }
 
-fn respond(line: &str, engine: &Engine) -> Value {
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(e) => return json!({"ok": false, "error": format!("bad json: {e}")}),
-    };
-    let id = v.get("id").cloned().unwrap_or(Value::Null);
-    let mut out = match run(&v, engine) {
-        Ok(r) => r,
-        Err(e) => json!({"ok": false, "error": e}),
-    };
-    out["id"] = id;
-    out
+/// The client is still connected with nothing more to ask yet: a session
+/// whose next request is a keystroke away. (One-shot clients like the CLI
+/// close their side as soon as the request is out.)
+fn waiting(conn: &UnixStream) -> bool {
+    let mut b = 0u8;
+    let n = unsafe { libc::recv(std::os::fd::AsRawFd::as_raw_fd(conn), (&raw mut b).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
 }
 
-fn run(v: &Value, engine: &Engine) -> Result<Value, String> {
+/// The answer to one request line, as one line of JSON.
+fn respond(line: &str, engine: &Engine, out: &mut Vec<u8>) {
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => return put(out, &json!({"ok": false, "error": format!("bad json: {e}")})),
+    };
+    let id = v.get("id").unwrap_or(&Value::Null);
+    match run(&v, engine) {
+        Ok(Reply::Hits(found, took_us)) => {
+            let hits = found
+                .iter()
+                .map(|f| Hit { kind: kind_name(f.kind), mtime: f.mtime, path: f.path.to_string_lossy(), score: f.score, size: f.size })
+                .collect();
+            put(out, &Hits { hits, id, ok: true, took_us })
+        }
+        Ok(Reply::Value(mut r)) => {
+            r["id"] = id.clone();
+            put(out, &r)
+        }
+        Err(e) => put(out, &json!({"ok": false, "error": e, "id": id})),
+    }
+}
+
+fn put(out: &mut Vec<u8>, v: &impl serde::Serialize) {
+    serde_json::to_writer(&mut *out, v).expect("json");
+    out.push(b'\n');
+}
+
+enum Reply {
+    Value(Value),
+    /// Name-search results and the search's own time (µs): the hot path,
+    /// written straight from the results.
+    Hits(Vec<Found>, u64),
+}
+
+/// The JSON of a name-search answer. Keys in sorted order, the order every
+/// other answer (a `Value` object) prints in.
+#[derive(serde::Serialize)]
+struct Hits<'a> {
+    hits: Vec<Hit<'a>>,
+    id: &'a Value,
+    ok: bool,
+    took_us: u64,
+}
+
+#[derive(serde::Serialize)]
+struct Hit<'a> {
+    kind: &'static str,
+    mtime: u32,
+    path: std::borrow::Cow<'a, str>,
+    score: i32,
+    size: u64,
+}
+
+fn run(v: &Value, engine: &Engine) -> Result<Reply, String> {
     let op = v.get("op").and_then(Value::as_str).unwrap_or("search");
     let is_grep = op == "grep"
         || (op == "search"
             && v.get("q").and_then(Value::as_str).is_some_and(|q| ["grep:", "regex:", "sym:", "content:", "symbol:"].iter().any(|k| q.contains(k))));
     match op {
-        "ping" => Ok(json!({"ok": true})),
+        "ping" => Ok(Reply::Value(json!({"ok": true}))),
         "save" => {
             engine.save();
-            Ok(json!({"ok": true, "scheduled": true}))
+            Ok(Reply::Value(json!({"ok": true, "scheduled": true})))
         }
-        _ if is_grep => grep(v, engine),
+        _ if is_grep => grep(v, engine).map(Reply::Value),
         "status" => {
             let s = engine.status();
             if !s.ready {
-                return Err("indexing (first run scans the whole disk, ~20s)".into());
+                return Err(engine.indexing());
             }
             let mut v = serde_json::to_value(s).map_err(|e| e.to_string())?;
             v["ok"] = true.into();
-            Ok(v)
+            Ok(Reply::Value(v))
         }
         "search" => {
             let q = parse_request(v, engine.home())?;
             let t = Instant::now();
             let found = engine.search(&q)?;
-            let took = t.elapsed().as_micros() as u64;
-            let hits: Vec<Value> = found
-                .iter()
-                .map(|f| {
-                    json!({
-                        "path": f.path.to_string_lossy(),
-                        "kind": kind_name(f.kind),
-                        "size": f.size,
-                        "mtime": f.mtime,
-                        "score": f.score,
-                    })
-                })
-                .collect();
-            Ok(json!({"ok": true, "took_us": took, "hits": hits}))
+            Ok(Reply::Hits(found, t.elapsed().as_micros() as u64))
         }
         _ => Err(format!("unknown op {op}")),
     }
@@ -201,8 +279,8 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
         });
     }
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log).spawn()?;
-    for _ in 0..100 {
-        std::thread::sleep(Duration::from_millis(30));
+    for _ in 0..1500 {
+        std::thread::sleep(Duration::from_millis(2));
         if let Ok(s) = UnixStream::connect(&sock) {
             return Ok(s);
         }

@@ -3,7 +3,7 @@
 FinderSearch's filename search is powered by **fsearch**, created by **Noah Dunnagan**.
 
 - Upstream: https://github.com/noahdunnagan/fsearch
-- Vendored revision: `af9476d39ec98108552670adf6badbbd77331b0a`
+- Vendored revision: `d753915440f0879004b8e11fd615eafc840cfa9c`
 - License: [MIT](vendor/fsearch/LICENSE)
 
 The upstream source is retained in `vendor/fsearch` without modifications. Its

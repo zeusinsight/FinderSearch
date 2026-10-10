@@ -29,6 +29,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         willSet { if !changingLocation && !isSearch { saveDefaultSnapshot() } }
         didSet {
             invalidateDerived()
+            if !isSearch, !scope.isEmpty { scope = "" }
             if !changingLocation && !isSearch,
                 let snapshot = snapshots[SnapshotKey(route: route, hidden: showHidden)]
             {
@@ -373,6 +374,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         error = mutationError
         if isSearch { extraHits = [] }
         let searchingNow = isSearch
+        if searchingNow { elapsed = 0 }
         let cached = !searchingNow && restoreDefaultSnapshot()
         if route.hasPrefix("tag:") && !isSearch { loadTag(String(route.dropFirst(4))); return }
         let folder = location, hidden = showHidden, text = query, searchScope = scope,
@@ -392,10 +394,12 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     var fields: [String: Any] = [
                         "q": recent ? "mtime:<30d kind:file" : text, "limit": recent ? 1000 : 500,
                     ]
-                    if recent {
-                        fields["in"] = NSHomeDirectory()
-                    } else if !searchScope.isEmpty {
-                        fields["in"] = searchScope
+                    // Virtual views keep the same scope while searching that
+                    // they advertise while browsing.
+                    let virtualScope =
+                        route == "recents" || route.hasPrefix("tag:") ? NSHomeDirectory() : nil
+                    if let scopePath = searchScope.isEmpty ? virtualScope : searchScope {
+                        fields["in"] = scopePath
                     }
                     if type == "dir" {
                         fields["kind"] = "dir"

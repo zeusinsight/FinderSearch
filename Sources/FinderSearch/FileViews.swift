@@ -330,6 +330,7 @@ struct ColumnBrowser<RowMenu: View>: View {
         }
         focusFiles()
         columns[index].selected = hit.path; columns = Array(columns.prefix(index + 1))
+        model.focusedPath = hit.path
         model.extraHits = columns.flatMap(\.items); model.selection = [hit.path]
         guard hit.isFolder else { return }
         model.navigate(hit.url);

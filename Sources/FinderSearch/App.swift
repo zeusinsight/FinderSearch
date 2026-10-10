@@ -191,7 +191,7 @@ struct BrowserView: View {
                 ToolbarItem {
                     Menu {
                         Picker("Sort By", selection: $model.sort) {
-                            ForEach(FileSort.allCases, id: \.self) { sort in
+                            ForEach(sortOptions, id: \.self) { sort in
                                 Text(sort.rawValue).tag(sort)
                             }
                         }
@@ -238,7 +238,9 @@ struct BrowserView: View {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }; keyMonitor = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
-            fileNavigationActive = false; model.sort = .relevance; keyboardFocus = .search
+            fileNavigationActive = false
+            if model.isSearch, model.sort != .relevance { model.sort = .relevance }
+            keyboardFocus = .search
         }
         .onReceive(
             NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
@@ -319,6 +321,10 @@ struct BrowserView: View {
             return event
         }
     }
+    /// Relevance only means something while a search is active.
+    private var sortOptions: [FileSort] {
+        FileSort.allCases.filter { $0 != .relevance || model.isSearch }
+    }
     private var searchScopeBar: some View {
         HStack(spacing: 10) {
             Text("Search:").foregroundStyle(.secondary)
@@ -370,7 +376,7 @@ struct BrowserView: View {
         }
     }
     private func updateColumns(_ width: Double) {
-        gridColumns = max(1, Int((width - 36) / (iconSize + 69)))
+        gridColumns = GridMetrics.columns(width: width, iconSize: iconSize)
     }
     private func iconScroll(minHeight: Double) -> some View {
         ScrollViewReader { proxy in

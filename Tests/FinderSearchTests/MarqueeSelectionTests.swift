@@ -146,6 +146,14 @@ final class MarqueeSelectionTests: XCTestCase {
         }
         let overlay = try XCTUnwrap(find(try XCTUnwrap(window.contentView)))
         XCTAssertGreaterThan(overlay.itemFrames.count, 3)
+        // SwiftUI can report a visibleRect extending left of the overlay's
+        // bounds into the sidebar. Those clicks must reach native navigation.
+        let sidebarPoint = CGPoint(x: -100, y: 40)
+        XCTAssertFalse(overlay.bounds.contains(sidebarPoint))
+        XCTAssertNotNil(
+            overlay.handle(try mouse(.leftMouseDown, at: sidebarPoint, in: overlay)))
+        XCTAssertNotNil(
+            overlay.handle(try mouse(.leftMouseUp, at: sidebarPoint, in: overlay)))
         let frames = overlay.itemFrames.values.sorted {
             $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY
         }

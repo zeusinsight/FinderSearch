@@ -136,7 +136,12 @@ private struct MarqueeOverlay: NSViewRepresentable {
         let point = convert(event.locationInWindow, from: nil)
         switch event.type {
         case .leftMouseDown:
-            guard !model.busy, visibleRect.contains(point), event.clickCount == 1 else {
+            // SwiftUI's scroll hosting can report a visibleRect beyond our
+            // bounds, including the sidebar. Never consume clicks outside the
+            // file content, even if AppKit considers those coordinates visible.
+            guard !model.busy, bounds.contains(point), visibleRect.contains(point),
+                event.clickCount == 1
+            else {
                 return event
             }
             if let table {

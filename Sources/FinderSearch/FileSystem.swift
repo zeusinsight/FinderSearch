@@ -53,6 +53,21 @@ struct FileBatch {
 
 enum OptimisticFiles {
     static func applying(_ operations: [FileMutation], to hits: [Hit], in folder: URL?) -> [Hit] {
+        guard !operations.isEmpty else { return hits }
+        // Trash batches commute: remove their paths in one stable pass. Mixed
+        // operations retain sequential semantics (a move can create a later target).
+        if operations.allSatisfy({
+            if case .trash = $0 { return true }; return false
+        }) {
+            guard !hits.isEmpty else { return hits }
+            var removed = Set<String>()
+            removed.reserveCapacity(operations.count)
+            for case .trash(let source) in operations { removed.insert(source.path) }
+            return hits.filter { !removed.contains($0.path) }
+        }
+        if let transferred = indexedTransfers(operations, hits: hits, folder: folder) {
+            return transferred
+        }
         var result = hits
         for operation in operations {
             switch operation {
@@ -120,6 +135,64 @@ enum OptimisticFiles {
             }
         }
         return result
+    }
+
+    // Only transfer-only batches with unique paths use the index. Other inputs
+    // keep the sequential implementation, including duplicate-row behavior.
+    private static func indexedTransfers(_ operations: [FileMutation], hits: [Hit], folder: URL?)
+        -> [Hit]?
+    {
+        guard !operations.isEmpty else { return hits }
+        for operation in operations {
+            switch operation {
+            case .move, .copy: break
+            default: return nil
+            }
+        }
+        var index: [String: Int] = [:]
+        index.reserveCapacity(hits.count + operations.count)
+        for (i, hit) in hits.enumerated() {
+            guard index.updateValue(i, forKey: hit.path) == nil else {
+                return nil
+            }
+        }
+        // Tombstones preserve the order of surviving rows; newly created paths
+        // append in operation order, including chained moves and copies.
+        var rows = hits.map(Optional.some)
+        rows.reserveCapacity(hits.count + operations.count)
+        let folderPath = folder?.path
+        for operation in operations {
+            let source: URL, destination: URL, moving: Bool
+            switch operation {
+            case .move(let from, let to): source = from; destination = to; moving = true
+            case .copy(let from, let to): source = from; destination = to; moving = false
+            default: return nil
+            }
+            let from = source.path, to = destination.path
+            guard index[to] == nil, let row = index[from], let original = rows[row] else {
+                continue
+            }
+            let destinationParent = destination.deletingLastPathComponent().path
+            if moving {
+                guard from != to else { continue }
+                rows[row] = nil
+                index.removeValue(forKey: from)
+                guard
+                    destinationParent == folderPath
+                        || (folder == nil
+                            && destinationParent == source.deletingLastPathComponent().path)
+                else { continue }
+            } else {
+                guard destinationParent == folderPath else { continue }
+            }
+            let updated = Hit(
+                path: to, kind: original.kind, size: original.size,
+                mtime: original.mtime, score: original.score,
+                metadataPending: original.metadataPending)
+            index[to] = rows.count
+            rows.append(updated)
+        }
+        return rows.compactMap { $0 }
     }
 
     static func selection(
@@ -191,6 +264,19 @@ enum LocalFiles {
         try await BackgroundWork.run { try list(folder, hidden: hidden) }
     }
     static func list(_ folder: URL, hidden: Bool) throws -> [Hit] {
+        try Task.checkCancellation()
+        do {
+            if let hits = try BulkDirectory.list(folder, hidden: hidden) { return hits }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Discard partial bulk results and retry through Foundation.
+            try Task.checkCancellation()
+        }
+        return try foundationList(folder, hidden: hidden)
+    }
+    static func foundationList(_ folder: URL, hidden: Bool) throws -> [Hit] {
+        try Task.checkCancellation()
         let urls = try FileManager.default.contentsOfDirectory(
             at: folder.resolvingSymlinksInPath(),
             includingPropertiesForKeys: [
@@ -349,6 +435,88 @@ enum LocalFiles {
 }
 
 enum FileOrdering {
+    struct Cache {
+        let source: [Hit]
+        let ordered: [Hit]
+        let sort: FileSort
+        let ascending: Bool
+        let showHidden: Bool
+        let isSearch: Bool
+        let locale: String
+    }
+
+    static func cached(
+        _ hits: [Hit], sort: FileSort, ascending: Bool, showHidden: Bool, isSearch: Bool,
+        previous: Cache? = nil
+    ) throws -> Cache {
+        try Task.checkCancellation()
+        let locale = Locale.current.identifier
+        func result(_ ordered: [Hit]) -> Cache {
+            Cache(
+                source: hits, ordered: ordered, sort: sort, ascending: ascending,
+                showHidden: showHidden, isSearch: isSearch, locale: locale)
+        }
+        if let previous, previous.sort == sort, previous.showHidden == showHidden,
+            previous.isSearch == isSearch, previous.locale == locale
+        {
+            if previous.source == hits {
+                if previous.ascending == ascending || (isSearch && sort == .relevance) {
+                    return result(previous.ordered)
+                }
+                // Reversing equal-key duplicates would violate stable sorting.
+                var paths = Set<String>()
+                paths.reserveCapacity(previous.ordered.count)
+                var unique = true
+                for hit in previous.ordered {
+                    try Task.checkCancellation()
+                    if !paths.insert(hit.path).inserted { unique = false; break }
+                }
+                if unique { return result(Array(previous.ordered.reversed())) }
+            }
+            if sort == .name && previous.ordered.count == hits.count {
+                // Exact visible membership is required; metadata can change freely.
+                // Inputs containing filtered rows conservatively take the full sort.
+                var byPath: [String: Hit] = [:]
+                byPath.reserveCapacity(hits.count)
+                var unique = true
+                for hit in hits {
+                    try Task.checkCancellation()
+                    if byPath.updateValue(hit, forKey: hit.path) != nil { unique = false; break }
+                }
+                if unique {
+                    var ordered: [Hit] = []
+                    ordered.reserveCapacity(previous.ordered.count)
+                    for hit in previous.ordered {
+                        try Task.checkCancellation()
+                        guard let updated = byPath.removeValue(forKey: hit.path) else {
+                            unique = false; break
+                        }
+                        ordered.append(updated)
+                    }
+                    if unique {
+                        if previous.ascending != ascending { ordered.reverse() }
+                        return result(ordered)
+                    }
+                }
+            }
+        }
+        return result(
+            try sorted(
+                hits, sort: sort, ascending: ascending,
+                showHidden: showHidden, isSearch: isSearch))
+    }
+
+    static func prepareCached(
+        _ hits: [Hit], sort: FileSort, ascending: Bool, showHidden: Bool, isSearch: Bool,
+        previous: Cache? = nil
+    ) async throws -> Cache {
+        try await BackgroundWork.run {
+            try cached(
+                hits, sort: sort, ascending: ascending, showHidden: showHidden,
+                isSearch: isSearch, previous: previous)
+        }
+    }
+
     private struct Entry {
         let hit: Hit
         let name: String

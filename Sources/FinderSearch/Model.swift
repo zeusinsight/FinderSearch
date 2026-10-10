@@ -44,7 +44,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var scope = "" { didSet { if !query.isEmpty { schedule() } } }
     @Published var fileType = "" { didSet { schedule() } }
     @Published var hits: [Hit] = [] { didSet { invalidateDerived() } }
-    @Published var extraHits: [Hit] = [] { didSet { selectedCache = nil } }
+    @Published var extraHits: [Hit] = [] {
+        didSet { selectedCache = nil; extraRowIndex = nil }
+    }
     @Published var selection: Set<String> = [] {
         didSet {
             selectedCache = nil
@@ -138,8 +140,29 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     private var task: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
     private var mutationError: String?
-    @Published private var sortedCache: [Hit]?
-    private var visibleCache: [Hit]?
+    @Published private var sortedCache: [Hit]? {
+        didSet { rowIndex = nil; selectedCache = nil }
+    }
+    private var visibleCache: [Hit]? {
+        didSet { rowIndex = nil; selectedCache = nil }
+    }
+    private var rowIndex: [String: Int]?
+    private var extraRowIndex: [String: Int]?
+    private var rowsByPath: [String: Int] {
+        if let rowIndex { return rowIndex }
+        let index = Self.indexRows(sortedHits)
+        rowIndex = index
+        return index
+    }
+    private static func indexRows(_ items: [Hit]) -> [String: Int] {
+        var index: [String: Int] = [:]
+        index.reserveCapacity(items.count)
+        for (row, hit) in items.enumerated() where index[hit.path] == nil {
+            index[hit.path] = row
+        }
+        return index
+    }
+    private var orderingCache: FileOrdering.Cache?
     private var orderingTask: Task<Void, Never>?
     private var orderingGeneration = 0
     private var selectedCache: [Hit]?
@@ -157,20 +180,22 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         sortedCache = nil; selectedCache = nil
         orderingTask?.cancel(); orderingGeneration += 1
         let revision = orderingGeneration
+        let previous = orderingCache
         let items = hits, ordering = sort, direction = ascending,
             hidden = showHidden, searching = isSearch
-        guard !items.isEmpty else { sortedCache = []; sorting = false; return }
+        guard !items.isEmpty else { orderingCache = nil; sortedCache = []; sorting = false; return }
         sorting = true
         orderingTask = Task { [weak self] in
             do {
-                let ordered = try await FileOrdering.prepare(
+                let prepared = try await FileOrdering.prepareCached(
                     items, sort: ordering, ascending: direction, showHidden: hidden,
-                    isSearch: searching)
+                    isSearch: searching, previous: previous)
                 guard !Task.isCancelled, let self, self.orderingGeneration == revision else {
                     return
                 }
                 self.selectedCache = nil
-                self.sortedCache = ordered
+                self.orderingCache = prepared
+                self.sortedCache = prepared.ordered
                 self.sorting = false
                 self.saveDefaultSnapshot()
             } catch is CancellationError {} catch {
@@ -180,10 +205,11 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             }
         }
     }
-    private func publish(_ items: [Hit], ordered: [Hit]) {
+    private func publish(_ items: [Hit], prepared: FileOrdering.Cache) {
         hits = items
         orderingTask?.cancel(); orderingGeneration += 1
-        sortedCache = ordered
+        orderingCache = prepared
+        sortedCache = prepared.ordered
         sorting = false
     }
     private var generation = 0
@@ -206,9 +232,29 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     var selectedItems: [Hit] {
         guard !selection.isEmpty else { return [] }
         if let selectedCache { return selectedCache }
-        var seen = Set<String>()
-        let result = (sortedHits + extraHits.filter { showHidden || !$0.name.hasPrefix(".") })
-            .filter { selection.contains($0.path) && seen.insert($0.path).inserted }
+        let items = sortedHits
+        let result: [Hit]
+        // Dense selections are cheaper to scan in display order than to sort
+        // thousands of individual lookups. Sparse selections never scan all rows.
+        if selection.count > (items.count + extraHits.count) / 4 {
+            var seen = Set<String>()
+            result = (items + extraHits.filter { showHidden || !$0.name.hasPrefix(".") })
+                .filter { selection.contains($0.path) && seen.insert($0.path).inserted }
+        } else {
+            let rows = rowsByPath
+            if extraRowIndex == nil { extraRowIndex = Self.indexRows(extraHits) }
+            let extras = extraRowIndex!
+            result = selection.compactMap { path -> (Int, Hit)? in
+                if let row = rows[path] { return (row, items[row]) }
+                if let row = extras[path] {
+                    let hit = extraHits[row]
+                    if showHidden || !hit.name.hasPrefix(".") {
+                        return (items.count + row, hit)
+                    }
+                }
+                return nil
+            }.sorted { $0.0 < $1.0 }.map { $0.1 }
+        }
         selectedCache = result
         return result
     }
@@ -229,8 +275,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             }
             selectionAnchor = focusedPath
         } else if extending, let anchor = selectionAnchor,
-            let start = sortedHits.firstIndex(where: { $0.path == anchor }),
-            let end = sortedHits.firstIndex(where: { $0.path == hit.path })
+            let start = rowsByPath[anchor],
+            let end = rowsByPath[hit.path]
         {
             focusedPath = hit.path
             selection = Set(sortedHits[min(start, end)...max(start, end)].map(\.path))
@@ -242,14 +288,15 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     func moveSelection(by delta: Int, extending: Bool) {
         let items = sortedHits
         guard !items.isEmpty else { return }
-        let current = focusedPath.flatMap { path in items.firstIndex { $0.path == path } }
+        let rows = rowsByPath
+        let current = focusedPath.flatMap { rows[$0] }
         let next =
             current.map { min(items.count - 1, max(0, $0 + delta)) }
             ?? (delta < 0 ? items.count - 1 : 0)
         let target = items[next].path
         if extending {
             let anchor = selectionAnchor ?? focusedPath ?? target
-            let start = items.firstIndex { $0.path == anchor } ?? next
+            let start = rows[anchor] ?? next
             focusedPath = target
             selection = Set(items[min(start, next)...max(start, next)].map(\.path))
             selectionAnchor = anchor
@@ -365,11 +412,11 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     if !cached {
                         await Task.yield()
                         let preview = try await folderPreviewLoader(folder, hidden)
-                        let ordered = try await FileOrdering.prepare(
+                        let prepared = try await FileOrdering.prepareCached(
                             preview, sort: .name, ascending: true, showHidden: hidden,
                             isSearch: false)
                         guard revision == generation, !Task.isCancelled else { return }
-                        publish(preview, ordered: ordered)
+                        publish(preview, prepared: prepared)
                         // Keep loading true while details fill in; the nonempty
                         // preview is already visible and can be selected.
                         await Task.yield()
@@ -377,18 +424,18 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     result = try await folderLoader(folder, hidden)
                 }
                 guard revision == generation, !Task.isCancelled else { return }
-                var ordered: [Hit]
+                var prepared: FileOrdering.Cache
                 while true {
                     let ordering = sort, direction = ascending, visibility = showHidden
-                    ordered = try await FileOrdering.prepare(
+                    prepared = try await FileOrdering.prepareCached(
                         result, sort: ordering, ascending: direction, showHidden: visibility,
-                        isSearch: searchingNow)
+                        isSearch: searchingNow, previous: orderingCache)
                     guard revision == generation, !Task.isCancelled else { return }
                     if ordering == sort && direction == ascending && visibility == showHidden {
                         break
                     }
                 }
-                publish(result, ordered: ordered)
+                publish(result, prepared: prepared)
                 selection.formIntersection(
                     Set(
                         (sortedHits + extraHits.filter { showHidden || !$0.name.hasPrefix(".") })
@@ -397,7 +444,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 if !searchingNow {
                     saveDefaultSnapshot()
                     if canWriteHere {
-                        prefetchFolders(Array(ordered.filter(\.isFolder).prefix(3)).map(\.url))
+                        prefetchFolders(
+                            Self.prefetchCandidates(in: prepared.ordered))
                     }
                 }
             } catch is CancellationError {} catch {
@@ -414,6 +462,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         if sort == snapshot.sort && ascending == snapshot.ascending, let ordered = snapshot.ordered
         {
             orderingTask?.cancel(); orderingGeneration += 1
+            orderingCache = nil
             sortedCache = ordered
             sorting = false
         }
@@ -443,6 +492,17 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         {
             snapshots.removeValue(forKey: snapshotOrder.removeFirst())
         }
+    }
+    static func prefetchCandidates(in items: [Hit]) -> [URL] {
+        var candidates: [URL] = []
+        candidates.reserveCapacity(3)
+        // Explicitly stop here: lazy Collection.filter/prefix can scan beyond
+        // the third match while computing its end index and count.
+        for hit in items where hit.isFolder {
+            candidates.append(hit.url)
+            if candidates.count == 3 { break }
+        }
+        return candidates
     }
     @discardableResult func prefetchFolder(_ folder: URL) -> Task<Void, Never>? {
         prefetchFolders([folder])

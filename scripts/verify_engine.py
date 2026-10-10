@@ -51,5 +51,41 @@ with tempfile.TemporaryDirectory(prefix='FinderSearch-verify-', dir=Path.home())
     print('PASS: exact ranking, typo matching, folder scope, type filters, live rename and deletion')
     print(f"Exact query engine time: {exact['took_us'] / 1000:.3f} ms")
 
+    # Content search: the phrase lives inside the file, and the reply carries
+    # the matching line numbers and text.
+    (scope / 'content-needle.txt').write_text('zeddystone content needle here\nfiller\n')
+    deadline = time.monotonic() + 10
+    grep = {}
+    while time.monotonic() < deadline:
+        grep = request(op='grep', pattern='zeddystone content needle', limit=10, **{'in': str(scope)})
+        if grep['files']:
+            break
+        time.sleep(.25)
+    matched = [f for f in grep['files'] if Path(f['path']).name == 'content-needle.txt']
+    assert matched, grep
+    lines = matched[0]['matches']
+    assert lines and lines[0]['line'] == 1 and 'needle' in lines[0]['text'], matched
+    assert grep['source'] == 'index' and grep['complete'], grep
+    print('PASS: content search returns matching lines from the content index')
+    print(f"Content query engine time: {grep['took_us'] / 1000:.3f} ms")
+
+    # A scope the content index skips falls back to reading candidate files, so
+    # the reply reports where the answers came from.
+    skipped = scope / 'node_modules'
+    skipped.mkdir()
+    (skipped / 'scanned-needle.txt').write_text('zeddystone scanned needle\n')
+    deadline = time.monotonic() + 10
+    scan = {}
+    while time.monotonic() < deadline:
+        scan = request(op='grep', pattern='zeddystone scanned needle', limit=10, **{'in': str(skipped)})
+        if scan['files']:
+            break
+        time.sleep(.25)
+    scanned = [f for f in scan['files'] if Path(f['path']).name == 'scanned-needle.txt']
+    assert scanned and scanned[0]['matches'], scan
+    assert scan['source'] == 'scan', scan
+    print('PASS: content search outside the index reads candidates directly')
+    print(f"Scan fallback engine time: {scan['took_us'] / 1000:.3f} ms")
+
 stream.close()
 sock.close()

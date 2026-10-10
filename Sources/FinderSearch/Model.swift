@@ -43,6 +43,33 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     }
     @Published var scope = "" { didSet { if !query.isEmpty { schedule() } } }
     @Published var fileType = "" { didSet { schedule() } }
+    /// When on, searches match file contents (the engine's content index)
+    /// instead of filenames.
+    @Published var contentSearch = false {
+        didSet {
+            guard oldValue != contentSearch else { return }
+            if contentSearch {
+                // Filename results are not content results: drop them so the
+                // view shows the content spinner instead of stale rows, and
+                // drop Kind ▸ Folder, which contents cannot match.
+                clearContentResults()
+                if fileType == "dir" { fileType = "" }
+                if isSearch { hits = []; selection = [] }
+            } else {
+                clearContentResults()
+                if isSearch { hits = []; selection = [] }
+            }
+            if isSearch { schedule() }
+        }
+    }
+    /// literal (smart case), regex, or symbol (definition of an identifier).
+    @Published var contentMode = "literal" {
+        didSet { if oldValue != contentMode, isSearch, contentSearch { schedule() } }
+    }
+    @Published var contentFiles: [ContentFile] = []
+    @Published var contentSource = ""
+    @Published var contentComplete = true
+    @Published var contentIndexing = 0
     @Published var hits: [Hit] = [] { didSet { invalidateDerived() } }
     @Published var extraHits: [Hit] = [] {
         didSet { selectedCache = nil; extraRowIndex = nil }
@@ -221,6 +248,14 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     private var metadataObserver: NSObjectProtocol?
     var canWriteHere: Bool { !isSearch && route != "recents" && !route.hasPrefix("tag:") }
     var isSearch: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// True while results come from the content index rather than the name index.
+    var contentActive: Bool { contentSearch && isSearch }
+    func matches(for path: String) -> [ContentMatch] {
+        contentFiles.first { $0.path == path }?.matches ?? []
+    }
+    private func clearContentResults() {
+        contentFiles = []; contentSource = ""; contentComplete = true; contentIndexing = 0
+    }
     var title: String {
         route == "recents"
             ? "Recents"
@@ -364,6 +399,13 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         schedule(immediate: true)
     }
 
+    /// Content search replies carry paths only; read the attributes the views
+    /// and sort need, off the main actor, keeping the engine's ranking.
+    static func hits(fromPaths paths: [String]) async -> [Hit] {
+        await Task.detached(priority: .userInitiated) {
+            paths.compactMap { try? Hit.read(URL(fileURLWithPath: $0)) }
+        }.value
+    }
     func schedule(immediate: Bool = false) {
         guard !changingLocation else { return }
         generation += 1; let revision = generation
@@ -373,6 +415,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         error = mutationError
         if isSearch { extraHits = [] }
         let searchingNow = isSearch
+        let contentNow = contentActive
         let cached = !searchingNow && restoreDefaultSnapshot()
         if route.hasPrefix("tag:") && !isSearch { loadTag(String(route.dropFirst(4))); return }
         let folder = location, hidden = showHidden, text = query, searchScope = scope,
@@ -382,7 +425,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         searchDebouncing = searchingNow && !immediate
         task = Task {
             do {
-                let result: [Hit]
+                var result: [Hit] = []
+                var contentReply: [ContentFile]?
+                var contentMeta: (source: String, complete: Bool, indexing: Int)?
                 if searchingNow || recent {
                     if searchingNow && !immediate {
                         try await Task.sleep(for: searchDebounce)
@@ -397,7 +442,21 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     } else if !searchScope.isEmpty {
                         fields["in"] = searchScope
                     }
-                    if type == "dir" {
+                    if contentNow {
+                        // Content search: the pattern is what to look for inside
+                        // files. Filename tokens, and the recency/kind filters
+                        // of the browsing views, stay out of the request, so the
+                        // Kind picker resets to Any Kind when contents are
+                        // searched.
+                        fields["op"] = "grep"
+                        fields["pattern"] = text
+                        fields["q"] = ""
+                        fields["mode"] = contentMode
+                        fields["per_file"] = 3
+                        fields["budget_ms"] = 4000
+                        // Directories never match contents.
+                        if !type.isEmpty, type != "dir" { fields["type"] = type }
+                    } else if type == "dir" {
                         fields["kind"] = "dir"
                     } else if !type.isEmpty {
                         fields["type"] = type
@@ -406,7 +465,15 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     guard reply.ok else {
                         throw Engine.Failure.message(reply.error ?? "Search failed")
                     }
-                    result = reply.hits ?? [];
+                    if contentNow {
+                        contentReply = reply.files ?? []
+                        contentMeta = (
+                            reply.source ?? "", reply.complete ?? true, reply.indexing ?? 0
+                        )
+                        result = await SearchModel.hits(fromPaths: contentReply!.map(\.path))
+                    } else {
+                        result = reply.hits ?? []
+                    }
                     if revision == generation { elapsed = Double(reply.took_us ?? 0) / 1000 }
                 } else {
                     if !cached {
@@ -424,6 +491,14 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     result = try await folderLoader(folder, hidden)
                 }
                 guard revision == generation, !Task.isCancelled else { return }
+                if let contentReply {
+                    // A superseded reply must never replace the state of the
+                    // query the user is looking at, so it lands after the guard.
+                    contentFiles = contentReply
+                    contentSource = contentMeta?.source ?? ""
+                    contentComplete = contentMeta?.complete ?? true
+                    contentIndexing = contentMeta?.indexing ?? 0
+                }
                 var prepared: FileOrdering.Cache
                 while true {
                     let ordering = sort, direction = ascending, visibility = showHidden

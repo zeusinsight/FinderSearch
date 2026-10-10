@@ -42,6 +42,7 @@ import UniformTypeIdentifiers
             }
             CommandGroup(replacing: .pasteboard) {
                 Button("Copy") { textOrFile("copy:") { model?.copy() } }.keyboardShortcut("c")
+                    .disabled(model?.selectedItems.isEmpty != false)
                 Button("Paste Items") { textOrFile("paste:") { model?.paste() } }.keyboardShortcut(
                     "v")
                 Button("Move Items Here") { model?.paste(move: true) }.keyboardShortcut(
@@ -514,7 +515,7 @@ struct BrowserView: View {
         Button("Quick Look") { model.preview = model.selected }.disabled(model.selection.isEmpty)
         Button("Rename…") { model.renameItems() }.disabled(model.selection.isEmpty || model.busy)
         Button("Duplicate") { model.duplicate() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Copy") { model.copy() }.disabled(model.selection.isEmpty)
+        Button("Copy") { model.copy() }.disabled(model.selectedItems.isEmpty)
         Button("Copy Path") { model.copyPath() }.disabled(model.selection.isEmpty)
         Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
         Button("Move Items Here") { model.paste(move: true) }.disabled(
@@ -554,7 +555,7 @@ struct BrowserView: View {
         }
         Button("Copy") {
             contextual(hit); model.copy()
-        }
+        }.disabled(model.selectedItems.isEmpty)
         Button("Copy Path") {
             contextual(hit); model.copyPath()
         }

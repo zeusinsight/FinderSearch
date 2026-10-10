@@ -88,6 +88,9 @@ opening or previewing a cloud file may trigger a provider download.
   Right-click empty space for New Folder, New Text File, Paste, view options, and Refresh; right-click
   files for their actions in every view, including columns and gallery.
   Rename edits the name in place: Return saves, Escape or clicking away cancels.
+  Renaming to change only letter case works; names with line breaks, control
+  characters, or more than 255 bytes are refused. Copy does nothing when nothing
+  is selected, so it never clears what you copied in another app.
   Files initially select their name without the extension; folders select the whole name.
   Creating a folder or text file immediately starts inline rename. Select multiple items
   and choose Rename for Replace Text, Add Text, or Numbered Names with a preview.

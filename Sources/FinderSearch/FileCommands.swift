@@ -54,6 +54,9 @@ extension SearchModel {
     }
     func trash() { perform(selectedItems.map { .trash($0.url) }, name: "Move to Trash") }
     func copy() {
+        // Neither an empty selection nor a selection filtered out of the
+        // listing may clear what the user copied elsewhere.
+        guard !selectedItems.isEmpty else { return }
         NSPasteboard.general.clearContents();
         NSPasteboard.general.writeObjects(selectedItems.map { $0.url as NSURL })
     }

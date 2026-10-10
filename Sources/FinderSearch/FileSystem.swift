@@ -220,6 +220,35 @@ enum OptimisticFiles {
     }
 }
 
+/// A path with symlinks in existing components resolved and the final
+/// component kept as written, so two spellings of the same item compare
+/// equal and a destination that does not exist yet is still comparable.
+func canonicalPath(_ url: URL) -> String {
+    url.deletingLastPathComponent()
+        .resolvingSymlinksInPath()
+        .appendingPathComponent(url.lastPathComponent)
+        .path
+}
+/// Names Finder accepts but that break path round-trips (line breaks, colon,
+/// control characters) are rejected before they reach the filesystem.
+enum FileName {
+    static func problem(_ name: String) -> String? {
+        if name.isEmpty || name.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Choose a valid filename."
+        }
+        if name == "." || name == ".." { return "Choose a valid filename." }
+        if name.contains("/") || name.contains(":") || name.contains("\0") {
+            return "Choose a valid filename without slashes, colons, or null characters."
+        }
+        if name.rangeOfCharacter(from: .controlCharacters) != nil {
+            return "Choose a valid filename without line breaks or control characters."
+        }
+        if name.utf8.count > 255 {
+            return "Choose a filename of 255 characters or fewer."
+        }
+        return nil
+    }
+}
 enum LocalFiles {
     /// Directory entries provide names and basic kinds without requesting every
     /// file's size, date, or provider metadata first.
@@ -384,7 +413,15 @@ enum LocalFiles {
                     guard source.standardizedFileURL != destination.standardizedFileURL else {
                         continue
                     }
-                    guard !FileManager.default.fileExists(atPath: destination.path) else {
+                    // APFS volumes are case-preserving but case-insensitive:
+                    // fileExists reports the file's own old casing, so compare
+                    // that case apart before refusing a case-only rename.
+                    let caseOnlyRename =
+                        canonicalPath(destination).lowercased()
+                        == canonicalPath(source).lowercased()
+                    guard caseOnlyRename
+                        || !FileManager.default.fileExists(atPath: destination.path)
+                    else {
                         throw NSError(
                             domain: "FinderSearch", code: 1,
                             userInfo: [

@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Matches SwiftUI's adaptive-grid column count so keyboard strides, rendered
+/// cells, and the loading skeleton never disagree about how many icons fit.
+enum GridMetrics {
+    static func columns(width: Double, iconSize: Double) -> Int {
+        max(1, Int((width - 36 + 14) / (iconSize + 69)))
+    }
+}
+
 /// Draw placeholders in one pass without creating file cells, loading icons,
 /// or adding animation work while the filesystem is busy.
 struct FolderLoadingSkeleton: View {
@@ -51,7 +59,7 @@ struct FolderLoadingSkeleton: View {
                 }
             }
         case .icons:
-            let count = max(1, Int((size.width - 36) / (iconSize + 69)))
+            let count = GridMetrics.columns(width: size.width, iconSize: iconSize)
             let cell = max(iconSize + 55, (size.width - 36) / Double(count))
             let height = iconSize + 72
             for row in 0..<min(12, Int(size.height / height) + 1) {

@@ -301,6 +301,14 @@ struct BrowserView: View {
                 if command == .new { workspace.newTab() } else { workspace.reopenClosedTab() }
                 return nil
             }
+            if !browserWindow.isSheet, model.preview == nil,
+                model.bufferRenameInput(event, editorIsActive: RenameTextField.editorIsActive(
+                    in: browserWindow, path: model.renaming?.path))
+            {
+                RenameTextField.focusPendingInput(in: browserWindow, path: model.renaming?.path)
+                return nil
+            }
+            if model.awaitingCreatedRename || model.renaming != nil { return event }
             if searchFocused && event.keyCode == 125 && !model.sortedHits.isEmpty {
                 focusFiles(); model.select(model.sortedHits[0], extending: false, toggling: false)
                 model.selectionNavigation.send((model.sortedHits[0].path, false)); return nil
@@ -590,6 +598,7 @@ struct BrowserView: View {
         if !model.selection.contains(hit.path) { model.selection = [hit.path] }
     }
     private func focusFiles() {
+        guard model.renaming == nil, !model.awaitingCreatedRename else { return }
         keyboardFocus = nil; fileNavigationActive = true
         if NSApp.keyWindow?.firstResponder is NSTextView {
             NSApp.keyWindow?.makeFirstResponder(nil)

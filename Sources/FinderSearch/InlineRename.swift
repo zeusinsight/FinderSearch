@@ -10,6 +10,7 @@ import AppKit
     private var originalName = ""
     private var nameRange = NSRange(location: 0, length: 0)
     private var wantsFocus = false
+    private var pendingInput: (() -> [NSEvent])?
 
     static func selectedNameRange(_ hit: Hit) -> NSRange {
         let name = hit.name as NSString
@@ -20,7 +21,9 @@ import AppKit
         return NSRange(location: 0, length: length)
     }
 
-    func begin(_ hit: Hit, commit: @escaping (String) -> Bool, cancel: @escaping () -> Void) {
+    func begin(_ hit: Hit, commit: @escaping (String) -> Bool, cancel: @escaping () -> Void,
+               pendingInput: @escaping () -> [NSEvent] = { [] }) {
+        self.pendingInput = pendingInput
         guard editingPath != hit.path else { return }
         editingPath = hit.path; self.commit = commit; self.cancel = cancel
         originalName = hit.name
@@ -37,14 +40,39 @@ import AppKit
         if window != nil { requestFocus() }
     }
 
-    private func requestFocus() {
+    private func requestFocus(force: Bool = false) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.editingPath != nil, self.wantsFocus,
-                let window = self.window, window.makeFirstResponder(self)
-            else { return }
+            guard let self, let path = self.editingPath, self.wantsFocus || force,
+                let window = self.window else { return }
+            let selectName = self.wantsFocus
+            guard window.makeFirstResponder(self), let editor = self.currentEditor() as? NSTextView else { return }
             self.wantsFocus = false
-            (self.currentEditor() as? NSTextView)?.selectedRange = self.nameRange
+            if selectName { editor.selectedRange = self.nameRange }
+            // Replay only keys the user actually typed while the folder/editor
+            // was being prepared, directly into this editor, never globally.
+            let events = self.pendingInput?() ?? []
+            for event in events {
+                guard self.editingPath == path else { break }
+                editor.keyDown(with: event)
+            }
         }
+    }
+
+    private static func field(in view: NSView, path: String) -> RenameTextField? {
+        if let field = view as? RenameTextField, field.editingPath == path { return field }
+        for child in view.subviews {
+            if let field = field(in: child, path: path) { return field }
+        }
+        return nil
+    }
+    static func editorIsActive(in window: NSWindow, path: String?) -> Bool {
+        guard let path, let content = window.contentView,
+              let field = field(in: content, path: path), let editor = field.currentEditor() else { return false }
+        return window.firstResponder === editor
+    }
+    static func focusPendingInput(in window: NSWindow, path: String?) {
+        guard let path, let content = window.contentView else { return }
+        field(in: content, path: path)?.requestFocus(force: true)
     }
 
     func end(resign: Bool = true) {
@@ -54,7 +82,7 @@ import AppKit
             while let view = parent, !(view is NSTableView) { parent = view.superview }
             window?.makeFirstResponder(parent)
         }
-        editingPath = nil; commit = nil; cancel = nil
+        editingPath = nil; commit = nil; cancel = nil; pendingInput = nil
         wantsFocus = false
         isEditable = false; isSelectable = false; isBordered = false; drawsBackground = false
         setAccessibilityLabel(nil)
@@ -90,12 +118,13 @@ private struct RenameField: NSViewRepresentable {
     let alignment: NSTextAlignment
     let commit: (String) -> Bool
     let cancel: () -> Void
+    let pendingInput: () -> [NSEvent]
 
     func makeNSView(context: Context) -> RenameTextField {
         let field = RenameTextField(string: hit.name)
         field.font = .systemFont(ofSize: 12); field.alignment = alignment
         field.lineBreakMode = .byClipping; field.maximumNumberOfLines = 1
-        field.begin(hit, commit: commit, cancel: cancel)
+        field.begin(hit, commit: commit, cancel: cancel, pendingInput: pendingInput)
         return field
     }
     func updateNSView(_ field: RenameTextField, context: Context) {}
@@ -116,7 +145,8 @@ struct FileNameLabel: View {
         if model.renaming?.path == hit.path {
             RenameField(
                 hit: hit, alignment: centered ? .center : .left,
-                commit: { model.commitRename($0) }, cancel: { model.cancelRename() }
+                commit: { model.commitRename($0) }, cancel: { model.cancelRename() },
+                pendingInput: { model.takeRenameInput(for: hit.path) }
             )
             .frame(height: 20)
         } else {

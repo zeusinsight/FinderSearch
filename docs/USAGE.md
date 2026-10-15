@@ -125,7 +125,9 @@ not intentionally download cloud file contents.
   offer Replace, Keep Both, or Skip, with an apply-to-all option. Replace preserves
   the old item in Trash for Undo. Long operations show progress and a Cancel button;
   cancellation retains completed items and restores interrupted replacements.
-  Command-Shift-N creates a uniquely named folder. Hover over a folder while dragging
+  Command-Shift-N creates a uniquely named folder and starts inline naming.
+  You can type immediately and press Return; input entered while creation or the
+  name editor is being prepared is retained for that editor. Hover over a folder while dragging
   to open it after a short delay.
 - **Trash and undo:** Command-Delete moves selected files to recoverable Trash;
   while editing text it remains a text-editing command. Command-Z and

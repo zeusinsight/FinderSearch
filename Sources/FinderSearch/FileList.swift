@@ -108,7 +108,8 @@ import AppKit
                     let model = parent.model
                     renameField = field
                     field.begin(
-                        hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+                        hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() },
+                        pendingInput: { model.takeRenameInput(for: hit.path) })
                 }
                 return
             }
@@ -162,7 +163,8 @@ import AppKit
                 renameField = field
                 let model = parent.model
                 field.begin(
-                    hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
+                    hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() },
+                        pendingInput: { model.takeRenameInput(for: hit.path) })
             }
         }
         func rememberScroll() {

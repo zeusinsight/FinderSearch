@@ -93,6 +93,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     var previewItems: [Hit] = []
     let springLoader = SpringLoader()
     @Published private(set) var renaming: Hit?
+    @Published private(set) var awaitingCreatedRename = false
+    private var pendingRenameKeys: [NSEvent] = []
     @Published var viewMode =
         FileViewMode(rawValue: UserDefaults.standard.string(forKey: "viewMode") ?? "icons")
         ?? .icons
@@ -632,7 +634,12 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         renameCreated: URL? = nil, completion: (([FileMutation]) -> Void)? = nil
     ) {
         guard !operations.isEmpty, !busy else { return }; busy = true; error = nil
+        let earlyNameKeys = renameCreated == nil ? [] : pendingRenameKeys
         cancelRename()
+        if renameCreated != nil {
+            awaitingCreatedRename = true
+            pendingRenameKeys = earlyNameKeys
+        }
         mutationError = nil
         operationName = name
         let operationID = UUID(); activeOperationID = operationID
@@ -708,6 +715,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 let created = hits.first(where: { $0.path == renameCreated.path })
             {
                 beginRename(created)
+            } else if renameCreated != nil {
+                cancelRename()
             }
         }
     }
@@ -716,6 +725,10 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         _ prepare: @escaping @Sendable () throws -> [FileMutation]
     ) {
         guard !busy else { return }
+        if renameCreated {
+            cancelRename()
+            awaitingCreatedRename = true
+        }
         busy = true; error = nil; mutationError = nil
         operationName = name
         operationProgress = FileOperationProgress()
@@ -726,6 +739,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 busy = false
                 operationProgress = nil
                 if operations.isEmpty {
+                    if renameCreated { cancelRename() }
                     schedule()
                 } else {
                     let created: URL?
@@ -740,8 +754,10 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     perform(operations, name: name, renameCreated: created)
                 }
             } catch is CancellationError {
+                if renameCreated { cancelRename() }
                 busy = false; operationProgress = nil; schedule()
             } catch {
+                if renameCreated { cancelRename() }
                 busy = false
                 operationProgress = nil
                 mutationError = error.localizedDescription
@@ -757,7 +773,22 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         selection = [hit.path]; error = nil; renaming = hit
         selectionNavigation.send((hit.path, false))
     }
+    func bufferRenameInput(_ event: NSEvent, editorIsActive: Bool) -> Bool {
+        guard (awaitingCreatedRename || renaming != nil), !editorIsActive,
+              event.type == .keyDown, !event.modifierFlags.contains(.command) else { return false }
+        pendingRenameKeys.append(event)
+        return true
+    }
+    func takeRenameInput(for path: String) -> [NSEvent] {
+        guard renaming?.path == path else { return [] }
+        awaitingCreatedRename = false
+        let events = pendingRenameKeys
+        pendingRenameKeys = []
+        return events
+    }
     func cancelRename() {
+        awaitingCreatedRename = false
+        pendingRenameKeys = []
         if renaming != nil { error = nil }
         renaming = nil
     }

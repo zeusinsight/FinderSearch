@@ -410,6 +410,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     searchDebouncing = false
                     var fields: [String: Any] = [
                         "q": recent ? "mtime:<30d kind:file" : text, "limit": recent ? 1000 : 500,
+                        "cwd": folder.path,
                     ]
                     if recent {
                         fields["in"] = NSHomeDirectory()

@@ -242,14 +242,25 @@ Use your mouse’s Back and Forward buttons to navigate the current tab, just li
 the toolbar buttons. Standard side-button events are supported; a mouse utility
 that remaps them to another action may need its mapping adjusted.
 
-Drag folders from the file view or Finder onto the sidebar to add them to **Favorites**.
+**Sync Finder Favorites** in Settings is off by default. Enable it to import the
+ordinary folders and their order from Finder immediately and when a window opens.
+The switch is saved across restarts. Turning it off keeps the current sidebar
+and stops automatic imports. Virtual destinations, saved searches, files, and
+application packages aren't imported. This is one-way: FinderSearch never changes Finder's
+favorites. If reading Finder fails, the last sidebar stays available; previously
+synced offline folders keep their cached positions. The original local list is
+saved in the app's preferences before the first successful sync.
+
+Drag folders from the file view or Finder onto the sidebar to add local favorites.
 Files and application packages are ignored, and the folders stay in their original location.
 Drag folders within **Favorites** to reorder them. A floating row preview follows
 your mouse, and a blue insertion marker shows where it will land. Press **Esc**
 to cancel a drag. Right-click a favorite for
 **Open**, **Open in New Tab**, **Reveal in Finder**, or **Remove from Sidebar**.
-Removing a shortcut does not delete the folder. Your order and removals are saved
-and shared between windows. Existing custom favorites are retained on upgrade.
+Removing a shortcut does not delete the folder. Local edits are saved and shared
+between windows and restarts. With sync enabled, a newly opened window follows
+Finder again. For lasting changes to the synchronized list, edit the favorites
+in Finder.
 To restore a removed folder, browse to it and choose **Add Folder to Sidebar**.
 Right-click locations for navigation actions and, where available, **Eject**.
 

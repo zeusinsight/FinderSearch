@@ -852,6 +852,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published private(set) var favorites: [String] = []
     private let favoritesDefaults: UserDefaults
     private var favoritesObserver: AnyCancellable?
+    private var didSyncFinderFavorites = false
     @Published private(set) var volumes: [MountedVolume] = []
     @Published private(set) var ejectingVolumes: Set<String> = []
     private let volumeLoader: @Sendable () async throws -> [MountedVolume]
@@ -911,6 +912,35 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         }
         tabs.removeAll { $0.id == id };
         if !tabs.contains(where: { $0.id == selectedTab }) { selectedTab = tabs[0].id }
+    }
+    func syncFinderFavorites(
+        enabled: Bool,
+        using loader: @Sendable ([FinderFavorites.Entry]) async throws -> [FinderFavorites.Entry] =
+            {
+                try await FinderFavorites.load(cached: $0)
+            }
+    ) async {
+        guard enabled else { didSyncFinderFavorites = false; return }
+        guard !didSyncFinderFavorites else { return }
+        didSyncFinderFavorites = true
+        let cached =
+            favoritesDefaults.data(forKey: FinderFavorites.cacheKey)
+            .flatMap { try? JSONDecoder().decode([FinderFavorites.Entry].self, from: $0) } ?? []
+        do {
+            let entries = try await loader(cached)
+            try Task.checkCancellation()
+            let data = try JSONEncoder().encode(entries)
+            if favoritesDefaults.object(forKey: FinderFavorites.originalKey) == nil {
+                favoritesDefaults.set(favorites, forKey: FinderFavorites.originalKey)
+            }
+            favoritesDefaults.set(data, forKey: FinderFavorites.cacheKey)
+            favorites = entries.map(\.path)
+            saveFavorites()
+        } catch {
+            // Keep the current list on permission, system API or resolution
+            // failure. A later appearance may retry a cancelled launch task.
+            didSyncFinderFavorites = false
+        }
     }
     func addFavorite(_ url: URL) {
         guard url.isFileURL else { return }

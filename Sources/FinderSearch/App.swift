@@ -4,6 +4,7 @@ import Quartz
 import UniformTypeIdentifiers
 
 @main struct FinderSearchApp: App {
+    @AppStorage(FinderFavorites.syncEnabledKey) private var syncFinderFavorites = false
     @Environment(\.openWindow) private var openWindow
     @FocusedObject private var model: SearchModel?
     @FocusedObject private var workspace: BrowserWorkspace?
@@ -102,6 +103,12 @@ import UniformTypeIdentifiers
                 }.keyboardShortcut("f")
             }
         }
+        Settings {
+            Form {
+                Toggle("Sync Finder Favorites", isOn: $syncFinderFavorites)
+            }
+            .formStyle(.grouped).frame(width: 360, height: 100)
+        }
     }
     private func textOrFile(_ selector: String, action: () -> Void) {
         if NSApp.keyWindow?.firstResponder is NSTextView {
@@ -113,10 +120,14 @@ import UniformTypeIdentifiers
 }
 extension Notification.Name { static let focusSearch = Notification.Name("focusSearch") }
 struct BrowserRoot: View {
+    @AppStorage(FinderFavorites.syncEnabledKey) private var syncFinderFavorites = false
     @StateObject private var workspace = BrowserWorkspace(sessionDefaults: .standard)
     var body: some View {
         BrowserView(workspace: workspace, model: workspace.current)
             .focusedSceneObject(workspace).focusedSceneObject(workspace.current)
+            .task(id: syncFinderFavorites) {
+                await workspace.syncFinderFavorites(enabled: syncFinderFavorites)
+            }
     }
 }
 

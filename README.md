@@ -20,6 +20,10 @@ preview files, and manage your files in a familiar macOS interface.
   filters like `ext:pdf` and `mtime:<7d`.
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
+- **Follow Finder's favorites.** Enable **Sync Finder Favorites** in Settings
+  to import folders and their order from Finder. It is off by default. Special
+  destinations such as AirDrop aren't imported.
+  Sidebar edits stay local; opening a window follows Finder only while sync is enabled.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,
   tags, sharing, Trash, and undo.
 - **Stay in control.** Transfer progress, cancellation, and clear choices when

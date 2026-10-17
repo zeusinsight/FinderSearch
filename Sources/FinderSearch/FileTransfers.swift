@@ -26,7 +26,8 @@ enum TransferPlan {
             let resolvedSource = source.resolvingSymlinksInPath().path
             let prefix = resolvedSource == "/" ? "/" : resolvedSource + "/"
             if target == resolvedSource || target.hasPrefix(prefix) {
-                throw Engine.Failure.message("A folder cannot be moved or copied inside itself.")
+                throw Engine.Failure.message(
+                    L10n.string("A folder cannot be moved or copied inside itself."))
             }
             let canonicalSource = source.deletingLastPathComponent().resolvingSymlinksInPath()
                 .appendingPathComponent(source.lastPathComponent)
@@ -51,19 +52,23 @@ struct ConflictSheet: View {
     @State private var applyToAll = false
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("“\(conflict.destination.lastPathComponent)” already exists").font(.headline)
+            Text(L10n.format("“%@” already exists", conflict.destination.lastPathComponent)).font(
+                .headline)
             Text(
-                "Choose what to do in \(conflict.destination.deletingLastPathComponent().path). Replace moves the existing item to Trash so Undo can restore it."
+                L10n.format(
+                    "Choose what to do in %@. Replace moves the existing item to Trash so Undo can restore it.",
+                    conflict.destination.deletingLastPathComponent().path)
             )
             .fixedSize(horizontal: false, vertical: true)
-            Toggle("Apply to all conflicts in this operation", isOn: $applyToAll)
+            Toggle(L10n.string("Apply to all conflicts in this operation"), isOn: $applyToAll)
             HStack {
-                Button("Cancel") { choose(.cancel, false) }.keyboardShortcut(.cancelAction)
+                Button(L10n.string("Cancel")) { choose(.cancel, false) }.keyboardShortcut(
+                    .cancelAction)
                 Spacer()
-                Button("Skip") { choose(.skip, applyToAll) }
-                Button("Keep Both") { choose(.keepBoth, applyToAll) }.keyboardShortcut(
+                Button(L10n.string("Skip")) { choose(.skip, applyToAll) }
+                Button(L10n.string("Keep Both")) { choose(.keepBoth, applyToAll) }.keyboardShortcut(
                     .defaultAction)
-                Button("Replace") { choose(.replace, applyToAll) }
+                Button(L10n.string("Replace")) { choose(.replace, applyToAll) }
             }
         }.padding(24).frame(width: 510)
     }

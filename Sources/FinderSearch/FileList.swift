@@ -20,9 +20,10 @@ import AppKit
         table.allowsMultipleSelection = true; table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         for (key, title, width, minimum) in [
-            ("name", "Name", 300.0, 180.0), ("modified", "Date Modified", 180.0, 145.0),
-            ("size", "Size", 85.0, 70.0), ("kind", "Kind", 130.0, 90.0),
-            ("where", "Where", 200.0, 130.0),
+            ("name", L10n.string("Name"), 300.0, 180.0),
+            ("modified", L10n.string("Date Modified"), 180.0, 145.0),
+            ("size", L10n.string("Size"), 85.0, 70.0), ("kind", L10n.string("Kind"), 130.0, 90.0),
+            ("where", L10n.string("Where"), 200.0, 130.0),
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(key))
             column.title = title; column.width = width; column.minWidth = minimum
@@ -310,15 +311,16 @@ import AppKit
             menu.autoenablesItems = false
             if !items.indices.contains(row) {
                 let writable = model.canWriteHere && !model.busy
-                add("New Folder", enabled: writable) { model.newFolder() }
-                add("New Text File", enabled: writable) { model.newTextFile() }
-                add("Paste Items", enabled: writable) { model.paste() }
-                add("Move Items Here", enabled: writable) { model.paste(move: true) }
+                add(L10n.string("New Folder"), enabled: writable) { model.newFolder() }
+                add(L10n.string("New Text File"), enabled: writable) { model.newTextFile() }
+                add(L10n.string("Paste Items"), enabled: writable) { model.paste() }
+                add(L10n.string("Move Items Here"), enabled: writable) { model.paste(move: true) }
                 menu.addItem(.separator())
-                add("Open in New Tab", enabled: model.canWriteHere) { [weak self] in
+                add(L10n.string("Open in New Tab"), enabled: model.canWriteHere) { [weak self] in
                     self?.parent.newTab(model.location)
                 }
-                add("Add Folder to Sidebar", enabled: model.canWriteHere) { [weak self] in
+                add(L10n.string("Add Folder to Sidebar"), enabled: model.canWriteHere) {
+                    [weak self] in
                     self?.parent.addFavorite(model.location)
                 }
                 menu.addItem(.separator())
@@ -327,18 +329,19 @@ import AppKit
                     let item = add(mode.title, to: views) { model.viewMode = mode }
                     item.state = model.viewMode == mode ? .on : .off
                 }
-                let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+                let viewItem = NSMenuItem(
+                    title: L10n.string("View"), action: nil, keyEquivalent: "")
                 viewItem.submenu = views; menu.addItem(viewItem)
-                let hidden = add("Show Hidden Files") { model.showHidden.toggle() }
+                let hidden = add(L10n.string("Show Hidden Files")) { model.showHidden.toggle() }
                 hidden.state = model.showHidden ? .on : .off
-                add("Refresh", enabled: !model.busy) { model.schedule() }
+                add(L10n.string("Refresh"), enabled: !model.busy) { model.schedule() }
                 return menu
             }
             if !table.selectedRowIndexes.contains(row) {
                 table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
             let hit = items[row]
-            add("Open") { model.open(hit) }
+            add(L10n.string("Open")) { model.open(hit) }
             if !hit.isFolder {
                 let applications = NSMenu(); applications.autoenablesItems = false
                 for application in OpenWithApps.applications(for: hit) {
@@ -347,29 +350,37 @@ import AppKit
                     }
                 }
                 applications.addItem(.separator())
-                add("Other…", to: applications) { model.chooseApplication(for: hit) }
-                let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+                add(L10n.string("Other…"), to: applications) { model.chooseApplication(for: hit) }
+                let item = NSMenuItem(
+                    title: L10n.string("Open With"), action: nil, keyEquivalent: "")
                 item.submenu = applications; menu.addItem(item)
             }
-            add("Open in New Tab", enabled: hit.isFolder) { [weak self] in
+            add(L10n.string("Open in New Tab"), enabled: hit.isFolder) { [weak self] in
                 self?.parent.newTab(hit.url)
             }
-            add("Quick Look") { model.preview = hit }
-            add("Open Enclosing Folder") { model.navigate(hit.url.deletingLastPathComponent()) }
+            add(L10n.string("Quick Look")) { model.preview = hit }
+            add(L10n.string("Open Enclosing Folder")) {
+                model.navigate(hit.url.deletingLastPathComponent())
+            }
             menu.addItem(.separator())
-            add("Get Info") { model.info() }
-            add("Rename…", enabled: !model.busy) { model.renameItems() }
-            add("Compress", enabled: !model.busy && model.canWriteHere) { model.compress() }
-            add("Extract ZIP", enabled: !model.busy && hit.url.pathExtension.lowercased() == "zip")
-            { model.extract() }
-            add("Duplicate", enabled: !model.busy) { model.duplicate() }
-            add("Cut", enabled: !model.busy) { model.cut() }
-            add("Copy") { model.copy() }
-            add("Copy Path") { model.copyPath() }
+            add(L10n.string("Get Info")) { model.info() }
+            add(L10n.string("Rename…"), enabled: !model.busy) { model.renameItems() }
+            add(L10n.string("Compress"), enabled: !model.busy && model.canWriteHere) {
+                model.compress()
+            }
+            add(
+                L10n.string("Extract ZIP"),
+                enabled: !model.busy && hit.url.pathExtension.lowercased() == "zip"
+            ) { model.extract() }
+            add(L10n.string("Duplicate"), enabled: !model.busy) { model.duplicate() }
+            add(L10n.string("Cut"), enabled: !model.busy) { model.cut() }
+            add(L10n.string("Copy")) { model.copy() }
+            add(L10n.string("Copy Path")) { model.copyPath() }
             let tags = NSMenu(); tags.autoenablesItems = false
             for name in ["Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Gray"] {
                 let item = NSMenuItem(
-                    title: name, action: #selector(runMenuAction(_:)), keyEquivalent: "")
+                    title: L10n.string(name), action: #selector(runMenuAction(_:)),
+                    keyEquivalent: "")
                 item.target = self; item.tag = actions.count; item.isEnabled = !model.busy;
                 item.state =
                     model.selectedItems.allSatisfy {
@@ -378,9 +389,10 @@ import AppKit
                     } ? .on : .off;
                 actions[item.tag] = { model.tag(name) }; tags.addItem(item)
             }
-            let tagItem = NSMenuItem(title: "Tags", action: nil, keyEquivalent: "");
+            let tagItem = NSMenuItem(title: L10n.string("Tags"), action: nil, keyEquivalent: "");
             tagItem.submenu = tags; menu.addItem(tagItem)
-            menu.addItem(.separator()); add("Move to Trash", enabled: !model.busy) { model.trash() }
+            menu.addItem(.separator());
+            add(L10n.string("Move to Trash"), enabled: !model.busy) { model.trash() }
             return menu
         }
         @objc private func runMenuAction(_ sender: NSMenuItem) { actions[sender.tag]?() }

@@ -3,6 +3,10 @@ import AppKit
 import UniformTypeIdentifiers
 
 enum SidebarTags {
+    static func title(for name: String) -> String {
+        values.contains { $0.0 == name } ? L10n.string(name) : name
+    }
+
     static let values: [(String, Color)] = [
         ("Red", .red), ("Orange", .orange), ("Yellow", .yellow), ("Green", .green),
         ("Blue", .blue), ("Purple", .purple), ("Gray", .gray),
@@ -51,7 +55,9 @@ enum FavoriteFolders {
             "a.square", "doc", "arrow.down.circle", "menubar.dock.rectangle", "photo", "music.note",
             "film",
         ]
-        if let index = defaults().firstIndex(of: path) { return (names[index], symbols[index]) }
+        if let index = defaults().firstIndex(of: path) {
+            return (L10n.string(names[index]), symbols[index])
+        }
         return ((path as NSString).lastPathComponent, "folder")
     }
 }
@@ -109,9 +115,12 @@ struct BrowserSidebar: View, Equatable {
                 Divider()
                 Button {
                     NSWorkspace.shared.open(
-                        URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                        URL(
+                            string:
+                                "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+                        )!)
                 } label: {
-                    Text("Enable Full Disk Access…")
+                    Text(L10n.string("Enable Full Disk Access…"))
                         .font(.caption).multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -131,15 +140,15 @@ struct BrowserSidebar: View, Equatable {
                 set: { if let route = $0 { select(route) } }
             )
         ) {
-            Label("Recents", systemImage: "clock").tag("recents")
-            Section("Favorites") {
+            Label(L10n.string("Recents"), systemImage: "clock").tag("recents")
+            Section(L10n.string("Favorites")) {
                 ForEach(state.favorites, id: \.self) { path in
                     let label = FavoriteFolders.label(for: path)
                     row(label.name, label.symbol, path)
                         .contextMenu {
                             folderActions(path)
                             Divider()
-                            Button("Remove from Sidebar") { removeFavorite(path) }
+                            Button(L10n.string("Remove from Sidebar")) { removeFavorite(path) }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background {
@@ -152,9 +161,10 @@ struct BrowserSidebar: View, Equatable {
                         }
                 }
             }
-            Section("Locations") {
+            Section(L10n.string("Locations")) {
                 row(
-                    "iCloud Drive", "icloud", home + "/Library/Mobile Documents/com~apple~CloudDocs"
+                    L10n.string("iCloud Drive"), "icloud",
+                    home + "/Library/Mobile Documents/com~apple~CloudDocs"
                 ).contextMenu {
                     folderActions(home + "/Library/Mobile Documents/com~apple~CloudDocs")
                 }
@@ -162,7 +172,10 @@ struct BrowserSidebar: View, Equatable {
                     .contextMenu { folderActions(home) }
                 ForEach(state.volumes) { volume in
                     let ejecting = state.ejectingVolumes.contains(volume.id)
-                    let ejectLabel = ejecting ? "Ejecting \(volume.name)…" : "Eject \(volume.name)"
+                    let ejectLabel =
+                        ejecting
+                        ? L10n.format("Ejecting %@…", volume.name)
+                        : L10n.format("Eject %@", volume.name)
                     HStack {
                         Label(volume.name, systemImage: "externaldrive")
                         Spacer(minLength: 4)
@@ -189,16 +202,16 @@ struct BrowserSidebar: View, Equatable {
                             folderActions(volume.id)
                             if volume.canEject {
                                 Divider()
-                                Button("Eject “\(volume.name)”") { eject(volume) }
+                                Button(L10n.format("Eject “%@”", volume.name)) { eject(volume) }
                                     .disabled(ejecting)
                             }
                         }
                 }
             }
-            Section("Tags") {
+            Section(L10n.string("Tags")) {
                 ForEach(SidebarTags.values, id: \.0) { name, color in
                     Label {
-                        Text(name)
+                        Text(L10n.string(name))
                     } icon: {
                         Image(systemName: "circle.fill").font(.system(size: 10))
                             .foregroundStyle(color)
@@ -222,9 +235,11 @@ struct BrowserSidebar: View, Equatable {
     }
 
     @ViewBuilder private func folderActions(_ path: String) -> some View {
-        Button("Open") { select(path) }
-        Button("Open in New Tab") { openInNewTab(URL(fileURLWithPath: path, isDirectory: true)) }
-        Button("Reveal in Finder") {
+        Button(L10n.string("Open")) { select(path) }
+        Button(L10n.string("Open in New Tab")) {
+            openInNewTab(URL(fileURLWithPath: path, isDirectory: true))
+        }
+        Button(L10n.string("Reveal in Finder")) {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
     }

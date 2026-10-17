@@ -12,20 +12,21 @@ struct QuickLookBrowser: View {
                     } label: {
                         Image(systemName: "chevron.left")
                     }
-                    .disabled(!model.canAdvancePreview(-1)).help("Previous file")
+                    .disabled(!model.canAdvancePreview(-1)).help(L10n.string("Previous file"))
                     Button {
                         model.advancePreview(1)
                     } label: {
                         Image(systemName: "chevron.right")
                     }
-                    .disabled(!model.canAdvancePreview(1)).help("Next file")
+                    .disabled(!model.canAdvancePreview(1)).help(L10n.string("Next file"))
                     Text(hit.name).font(.headline).lineLimit(1)
                     Spacer()
                     Text(model.previewPosition).foregroundStyle(.secondary).monospacedDigit()
-                    Button("Open") {
+                    Button(L10n.string("Open")) {
                         model.open(hit); model.preview = nil
                     }
-                    Button("Done") { model.preview = nil }.keyboardShortcut(.cancelAction)
+                    Button(L10n.string("Done")) { model.preview = nil }.keyboardShortcut(
+                        .cancelAction)
                 }.padding()
                 Divider()
                 QuickLook(url: hit.url).frame(minWidth: 650, minHeight: 470)
@@ -58,7 +59,10 @@ extension SearchModel {
     var previewIndex: Int? {
         preview.flatMap { hit in previewItems.firstIndex { $0.path == hit.path } }
     }
-    var previewPosition: String { previewIndex.map { "\($0 + 1) of \(previewItems.count)" } ?? "" }
+    var previewPosition: String {
+        previewIndex.map { L10n.format("%lld of %lld", Int64($0 + 1), Int64(previewItems.count)) }
+            ?? ""
+    }
     func canAdvancePreview(_ offset: Int) -> Bool {
         guard let index = previewIndex else { return false }
         return previewItems.indices.contains(index + offset)

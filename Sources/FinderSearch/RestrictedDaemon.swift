@@ -46,7 +46,8 @@ enum RestrictedDaemon {
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else {
                 return false
             }
-            let started = TimeInterval(info.pbi_start_tvsec)
+            let started =
+                TimeInterval(info.pbi_start_tvsec)
                 + TimeInterval(info.pbi_start_tvusec) / 1_000_000
             guard started < replacementDate.timeIntervalSince1970 else { return false }
         }
@@ -55,7 +56,7 @@ enum RestrictedDaemon {
         guard attempted.insert(expected).inserted else { return false }
         guard kill(pid, SIGTERM) == 0 || errno == ESRCH else {
             throw Engine.Failure.message(
-                "Could not restart the search engine. Try again shortly.")
+                L10n.string("Could not restart the search engine. Try again shortly."))
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 3
         repeat {
@@ -65,6 +66,7 @@ enum RestrictedDaemon {
             }
             Thread.sleep(forTimeInterval: 0.02)
         } while ProcessInfo.processInfo.systemUptime < deadline
-        throw Engine.Failure.message("Search engine is still stopping. Try again shortly.")
+        throw Engine.Failure.message(
+            L10n.string("Search engine is still stopping. Try again shortly."))
     }
 }

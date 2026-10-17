@@ -13,18 +13,26 @@ final class PerformanceTests: XCTestCase {
         XCTAssertNotNil(scroll.documentView)
         coordinator.update()
         let background = coordinator.menu(for: -1)
-        XCTAssertTrue(try XCTUnwrap(background.item(withTitle: "New Folder")).isEnabled)
-        XCTAssertTrue(try XCTUnwrap(background.item(withTitle: "New Text File")).isEnabled)
-        XCTAssertNotNil(background.item(withTitle: "Paste Items"))
-        XCTAssertNotNil(background.item(withTitle: "View")?.submenu)
+        XCTAssertTrue(
+            try XCTUnwrap(background.item(withTitle: L10n.string("New Folder"))).isEnabled)
+        XCTAssertTrue(
+            try XCTUnwrap(background.item(withTitle: L10n.string("New Text File"))).isEnabled)
+        XCTAssertNotNil(background.item(withTitle: L10n.string("Paste Items")))
+        XCTAssertNotNil(background.item(withTitle: L10n.string("View"))?.submenu)
         let file = coordinator.menu(for: 0)
-        XCTAssertNotNil(file.item(withTitle: "Rename…"))
-        XCTAssertNil(file.item(withTitle: "New Folder"))
+        XCTAssertNotNil(file.item(withTitle: L10n.string("Rename…")))
+        XCTAssertNil(file.item(withTitle: L10n.string("New Folder")))
         model.busy = true
-        XCTAssertFalse(try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: "New Folder")).isEnabled)
-        XCTAssertFalse(try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: "New Text File")).isEnabled)
+        XCTAssertFalse(
+            try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: L10n.string("New Folder")))
+                .isEnabled)
+        XCTAssertFalse(
+            try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: L10n.string("New Text File")))
+                .isEnabled)
         model.busy = false; model.query = "search"
-        XCTAssertFalse(try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: "Paste Items")).isEnabled)
+        XCTAssertFalse(
+            try XCTUnwrap(coordinator.menu(for: -1).item(withTitle: L10n.string("Paste Items")))
+                .isEnabled)
     }
     @MainActor func testToolbarViewPickerKeepsGeometryAndImagesAcrossUpdates() {
         var mode: FileViewMode = .icons
@@ -41,7 +49,9 @@ final class PerformanceTests: XCTestCase {
             XCTAssertEqual(control.intrinsicContentSize, originalSize)
             XCTAssertEqual(control.frame, originalFrame)
             for segment in FileViewMode.allCases.indices {
-                XCTAssertTrue(control.image(forSegment: segment) === images[segment], "Navigation updates must reuse symbol images")
+                XCTAssertTrue(
+                    control.image(forSegment: segment) === images[segment],
+                    "Navigation updates must reuse symbol images")
             }
         }
         control.selectedSegment = 0
@@ -50,7 +60,8 @@ final class PerformanceTests: XCTestCase {
     }
     @MainActor func testLargeFolderPreparationKeepsMainActorAvailable() async throws {
         let hits = (0..<30000).map {
-            Hit(path: "/fixture/file-\(($0 * 7919) % 30000).txt", kind: "file",
+            Hit(
+                path: "/fixture/file-\(($0 * 7919) % 30000).txt", kind: "file",
                 size: 1, mtime: 0, score: 0)
         }
         var completed = false
@@ -70,13 +81,16 @@ final class PerformanceTests: XCTestCase {
         XCTAssertEqual(ordered.count, 30000)
         XCTAssertEqual(ordered.first?.name, "file-0.txt")
         XCTAssertEqual(ordered.last?.name, "file-29999.txt")
-        print("PERFORMANCE folder sort: 30,000 files = \(Date().timeIntervalSince(start) * 1000) ms; \(heartbeats) UI heartbeats")
+        print(
+            "PERFORMANCE folder sort: 30,000 files = \(Date().timeIntervalSince(start) * 1000) ms; \(heartbeats) UI heartbeats"
+        )
     }
 
     @MainActor func testColdFolderLoadUsesCurrentSortAndIgnoresAbandonedNavigation() async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("FinderSearch-cold-" + UUID().uuidString)
-        let large = root.appendingPathComponent("Large"), small = root.appendingPathComponent("Small")
+        let large = root.appendingPathComponent("Large"),
+            small = root.appendingPathComponent("Small")
         try FileManager.default.createDirectory(at: large, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: small, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -148,7 +162,8 @@ final class PerformanceTests: XCTestCase {
     @MainActor func testModelResortingKeepsRowsAndRejectsStaleResults() async throws {
         let model = SearchModel()
         model.hits = (0..<30000).map {
-            Hit(path: "/fixture/file-\($0).txt", kind: "file", size: UInt64($0),
+            Hit(
+                path: "/fixture/file-\($0).txt", kind: "file", size: UInt64($0),
                 mtime: UInt64($0 % 7), score: 0)
         }
         model.sort = .size; model.ascending = false
@@ -164,13 +179,17 @@ final class PerformanceTests: XCTestCase {
         XCTAssertEqual(model.sortedHits.first?.size, 29999)
         model.sort = .name
         model.ascending = true
-        model.hits = [Hit(path: "/fixture/replacement.txt", kind: "file", size: 1, mtime: 0, score: 0)]
+        model.hits = [
+            Hit(path: "/fixture/replacement.txt", kind: "file", size: 1, mtime: 0, score: 0)
+        ]
         for _ in 0..<200 {
             if !model.sorting { break }; try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertFalse(model.sorting)
         try await Task.sleep(for: .milliseconds(150))
-        XCTAssertEqual(model.sortedHits.map(\.name), ["replacement.txt"], "An abandoned sort cannot replace new rows")
+        XCTAssertEqual(
+            model.sortedHits.map(\.name), ["replacement.txt"],
+            "An abandoned sort cannot replace new rows")
     }
     @MainActor func testSelectionCacheInvalidatesAndKeyboardRangeShrinks() {
         let model = SearchModel()

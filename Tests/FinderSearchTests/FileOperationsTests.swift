@@ -78,12 +78,16 @@ final class FileOperationsTests: XCTestCase {
         let field = RenameTextField(string: hit.name)
         field.begin(hit, commit: { model.commitRename($0) }, cancel: { model.cancelRename() })
         let editor = NSTextView(); editor.string = "bad/name"
-        XCTAssertTrue(field.control(field, textView: editor,
-            doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertTrue(
+            field.control(
+                field, textView: editor,
+                doCommandBy: #selector(NSResponder.insertNewline(_:))))
         XCTAssertNotNil(model.renaming, "Invalid input keeps editing active")
         field.stringValue = "bad/name"
-        XCTAssertTrue(field.control(field, textView: editor,
-            doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        XCTAssertTrue(
+            field.control(
+                field, textView: editor,
+                doCommandBy: #selector(NSResponder.cancelOperation(_:))))
         XCTAssertNil(model.renaming)
         XCTAssertNil(field.editingPath)
         XCTAssertEqual(field.stringValue, hit.name)
@@ -189,12 +193,14 @@ final class FileOperationsTests: XCTestCase {
         model.navigate(folder)
         model.transfer([folder], to: child, move: true)
         try await waitForOperation(model)
-        XCTAssertEqual(model.error, "A folder cannot be moved or copied inside itself.")
+        XCTAssertEqual(
+            model.error, L10n.string("A folder cannot be moved or copied inside itself."))
         XCTAssertTrue(model.undoStack.isEmpty)
         XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "original")
     }
     @MainActor func testOptimisticRenameAndPartialFailureReconcileWithUndo() async throws {
-        let a = try write("a.txt"), b = try write("b.txt"), existing = try write("existing.txt", "keep")
+        let a = try write("a.txt"), b = try write("b.txt"),
+            existing = try write("existing.txt", "keep")
         let renamed = folder.appendingPathComponent("renamed.txt")
         let model = SearchModel(); model.navigate(folder)
         for _ in 0..<100 {
@@ -416,7 +422,9 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertFalse(model.sorting)
         XCTAssertEqual(model.sortedHits.map(\.name), ["a.txt", "b.txt"])
         model.ascending = false
-        XCTAssertEqual(model.sortedHits.map(\.name), ["a.txt", "b.txt"], "Keep rows until the new order is ready")
+        XCTAssertEqual(
+            model.sortedHits.map(\.name), ["a.txt", "b.txt"],
+            "Keep rows until the new order is ready")
         for _ in 0..<100 {
             if !model.sorting { break }; try await Task.sleep(for: .milliseconds(10))
         }
@@ -506,8 +514,12 @@ private actor PreviewFolderLoader {
     func load(_ folder: URL, _ hidden: Bool) throws -> [Hit] {
         requests += 1
         if requests > 1 && failRefresh { throw CocoaError(.fileReadNoPermission) }
-        return [Hit(path: folder.appendingPathComponent(requests == 1 ? "cached.txt" : "fresh.txt").path,
-            kind: "file", size: 1, mtime: 0, score: 0)]
+        return [
+            Hit(
+                path: folder.appendingPathComponent(requests == 1 ? "cached.txt" : "fresh.txt")
+                    .path,
+                kind: "file", size: 1, mtime: 0, score: 0)
+        ]
     }
 }
 
@@ -523,8 +535,9 @@ private final class DiskAccessProbe: @unchecked Sendable {
 private struct StatusSearchEngine: SearchService {
     let fullDiskAccess: Bool?
     func request(_ fields: [String: Any]) async throws -> Reply {
-        Reply(ok: true, error: nil, hits: nil, took_us: nil, entries: 1,
-              full_disk_access: fullDiskAccess)
+        Reply(
+            ok: true, error: nil, hits: nil, took_us: nil, entries: 1,
+            full_disk_access: fullDiskAccess)
     }
 }
 

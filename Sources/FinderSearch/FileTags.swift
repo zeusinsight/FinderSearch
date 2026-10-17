@@ -150,10 +150,12 @@ final class FileTagView: NSView {
     }
     private func update(_ tags: [FileTag]) {
         self.tags = tags
-        toolTip = tags.isEmpty ? nil : tags.map(\.name).joined(separator: ", ")
+        toolTip =
+            tags.isEmpty
+            ? nil : tags.map { SidebarTags.title(for: $0.name) }.joined(separator: ", ")
         setAccessibilityElement(!tags.isEmpty)
         setAccessibilityRole(.image)
-        setAccessibilityLabel(toolTip.map { "Tags: " + $0 })
+        setAccessibilityLabel(toolTip.map { L10n.string("Tags: ") + $0 })
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }

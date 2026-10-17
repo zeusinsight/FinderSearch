@@ -4,7 +4,7 @@ import Darwin
 struct FileOperationProgress: Sendable {
     var completed = 0
     var total = 0
-    var item = "Preparing…"
+    var item = L10n.string("Preparing…")
     var bytes: Int64 = 0
     var expectedBytes: Int64 = 0
     var fraction: Double? {
@@ -73,7 +73,8 @@ final class FileOperationControl: @unchecked Sendable {
         let output = try reader.read(upToCount: 4096) ?? Data()
         guard task.terminationStatus == 0 else {
             throw Engine.Failure.message(
-                String(data: output.prefix(4096), encoding: .utf8) ?? "The operation failed.")
+                String(data: output.prefix(4096), encoding: .utf8)
+                    ?? L10n.string("The operation failed."))
         }
         return output
     }

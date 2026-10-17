@@ -25,6 +25,8 @@ app="$PWD/dist/FinderSearch.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
 ./scripts/build-icon.sh "$app/Contents/Resources/AppIcon.icns"
 cp "$swift_bin/FinderSearch" "$app/Contents/MacOS/"
+# SwiftPM resources must travel with the installed app, not refer to .build.
+ditto "$swift_bin/FinderSearch_FinderSearch.bundle" "$app/Contents/Resources/FinderSearch_FinderSearch.bundle"
 cp vendor/fsearch/target/release/fsearch "$app/Contents/Helpers/"
 cp vendor/fsearch/LICENSE "$app/Contents/Resources/fsearch-LICENSE"
 if [[ -f LICENSE ]]; then
@@ -37,6 +39,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>FinderSearch</string>
 <key>CFBundleIdentifier</key><string>local.findersearch.app</string>
 <key>CFBundleName</key><string>FinderSearch</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.4.9</string>

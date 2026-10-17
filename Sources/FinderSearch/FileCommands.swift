@@ -5,12 +5,13 @@ extension SearchModel {
     func reveal() { NSWorkspace.shared.activateFileViewerSelecting(selectedItems.map(\.url)) }
     func chooseFolder() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false;
-        panel.prompt = "Open"
+        panel.prompt = L10n.string("Open")
         if panel.runModal() == .OK, let url = panel.url { navigate(url) }
     }
     func goToFolder() {
-        let alert = NSAlert(); alert.messageText = "Go to Folder"; alert.addButton(withTitle: "Go");
-        alert.addButton(withTitle: "Cancel")
+        let alert = NSAlert(); alert.messageText = L10n.string("Go to Folder");
+        alert.addButton(withTitle: L10n.string("Go"));
+        alert.addButton(withTitle: L10n.string("Cancel"))
         let field = EditingTextField(string: location.path);
         field.frame = NSRect(x: 0, y: 0, width: 420, height: 24); alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -88,8 +89,12 @@ extension SearchModel {
                 let item = details.0
                 let alert = NSAlert(); alert.messageText = item.name
                 alert.informativeText =
-                    "Kind: \(item.typeName)\nSize: \(ByteCountFormatter.string(fromByteCount: Int64(clamping: item.size), countStyle: .file))\nModified: \(item.modified.formatted())\nWhere: \(item.parent)\nTags: \(details.1.joined(separator: ", "))"
-                alert.addButton(withTitle: "OK"); alert.runModal()
+                    L10n.format(
+                        "Kind: %@\nSize: %@\nModified: %@\nWhere: %@\nTags: %@", item.typeName,
+                        ByteCountFormatter.string(
+                            fromByteCount: Int64(clamping: item.size), countStyle: .file),
+                        item.modified.formatted(), item.parent, details.1.joined(separator: ", "))
+                alert.addButton(withTitle: L10n.string("OK")); alert.runModal()
             } catch {
                 if location == folder { self.error = error.localizedDescription }
             }

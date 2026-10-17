@@ -12,9 +12,11 @@ final class VolumeTests: XCTestCase {
 
     @MainActor func testStartupDiskCannotBeEjected() async throws {
         let root = MountedVolume(url: URL(fileURLWithPath: "/", isDirectory: true), canEject: true)
-        let workspace = BrowserWorkspace(volumeLoader: { [root] }, volumeEjector: { _ in
-            XCTFail("The startup disk must never reach the eject API")
-        })
+        let workspace = BrowserWorkspace(
+            volumeLoader: { [root] },
+            volumeEjector: { _ in
+                XCTFail("The startup disk must never reach the eject API")
+            })
         try await waitForVolumes(workspace)
         XCTAssertFalse(root.canEject)
         workspace.eject(root) { _ in XCTFail("A non-ejectable volume is ignored") }
@@ -24,7 +26,8 @@ final class VolumeTests: XCTestCase {
 
     @MainActor func testFailedEjectKeepsVolumeAndPreventsDuplicateRequests() async throws {
         let fixture = VolumeFixture(fails: true)
-        let workspace = BrowserWorkspace(volumeLoader: { await fixture.volumes },
+        let workspace = BrowserWorkspace(
+            volumeLoader: { await fixture.volumes },
             volumeEjector: { try await fixture.eject($0) })
         try await waitForVolumes(workspace)
         let volume = try XCTUnwrap(workspace.volumes.first)
@@ -38,14 +41,20 @@ final class VolumeTests: XCTestCase {
         }
         XCTAssertTrue(workspace.ejectingVolumes.isEmpty)
         XCTAssertEqual(workspace.volumes, [volume])
-        XCTAssertEqual(errors, ["Could not eject ‘FinderSearch-test-volume’: Volume is in use."])
+        XCTAssertEqual(
+            errors,
+            [
+                L10n.format(
+                    "Could not eject ‘%@’: %@", "FinderSearch-test-volume", "Volume is in use.")
+            ])
         let attempts = await fixture.attempts
         XCTAssertEqual(attempts, 1)
     }
 
     @MainActor func testSuccessfulEjectRemovesVolumeAndRefreshesLocations() async throws {
         let fixture = VolumeFixture(fails: false)
-        let workspace = BrowserWorkspace(volumeLoader: { await fixture.volumes },
+        let workspace = BrowserWorkspace(
+            volumeLoader: { await fixture.volumes },
             volumeEjector: { try await fixture.eject($0) })
         try await waitForVolumes(workspace)
         let volume = try XCTUnwrap(workspace.volumes.first)
@@ -62,8 +71,12 @@ final class VolumeTests: XCTestCase {
 }
 
 private actor VolumeFixture {
-    var volumes = [MountedVolume(url: URL(fileURLWithPath: "/Volumes/FinderSearch-test-volume",
-        isDirectory: true), canEject: true)]
+    var volumes = [
+        MountedVolume(
+            url: URL(
+                fileURLWithPath: "/Volumes/FinderSearch-test-volume",
+                isDirectory: true), canEject: true)
+    ]
     var attempts = 0
     let fails: Bool
     init(fails: Bool) { self.fails = fails }

@@ -24,7 +24,7 @@ enum BatchRenames {
             let stem = ext.isEmpty ? hit.name : hit.url.deletingPathExtension().lastPathComponent
             let name: String
             guard spec.start >= 0, spec.start <= Int.max - hits.count else {
-                throw Engine.Failure.message("Choose a valid starting number.")
+                throw Engine.Failure.message(L10n.string("Choose a valid starting number."))
             }
             switch spec.mode {
             case .replace:
@@ -38,7 +38,7 @@ enum BatchRenames {
                 !name.contains("\0"), !name.contains(":")
             else {
                 throw Engine.Failure.message(
-                    "Names cannot be empty or contain /, : or a null character.")
+                    L10n.string("Names cannot be empty or contain /, : or a null character."))
             }
             let destination = hit.url.deletingLastPathComponent().appendingPathComponent(
                 name + (ext.isEmpty ? "" : "." + ext))
@@ -52,7 +52,7 @@ enum BatchRenames {
                 caseSensitive[parent.path] == false
                 ? destination.path.lowercased() : destination.path
             guard destinations.insert(key).inserted else {
-                throw Engine.Failure.message("Each item needs a different name.")
+                throw Engine.Failure.message(L10n.string("Each item needs a different name."))
             }
             return RenameMove(source: hit.url, destination: destination)
         }.filter { $0.source != $0.destination }
@@ -73,7 +73,7 @@ enum BatchRenames {
                     && identities.contains(identity(move.destination) ?? ""))
             {
                 throw Engine.Failure.message(
-                    "“\(move.destination.lastPathComponent)” already exists.")
+                    L10n.format("“%@” already exists.", move.destination.lastPathComponent))
             }
         }
     }
@@ -120,7 +120,9 @@ enum BatchRenames {
                     try NativeFileCopy.move(current, to: entry.move.source, control: recovery)
                 } catch {
                     batch.errors.append(
-                        "Could not restore \(entry.move.source.lastPathComponent). Its file is at \(current.path)."
+                        L10n.format(
+                            "Could not restore %@. Its file is at %@.",
+                            entry.move.source.lastPathComponent, current.path)
                     )
                     batch.inverse.append(.move(current, entry.move.source))
                 }
@@ -144,17 +146,23 @@ struct BatchRenameSheet: View {
     @State private var checking = true
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Rename \(request.hits.count) Items").font(.headline)
-            Picker("Format", selection: $spec.mode) {
-                ForEach(BatchRenameSpec.Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            Text(L10n.format("Rename %lld Items", Int64(request.hits.count))).font(.headline)
+            Picker(L10n.string("Format"), selection: $spec.mode) {
+                ForEach(BatchRenameSpec.Mode.allCases, id: \.self) {
+                    Text(L10n.string($0.rawValue)).tag($0)
+                }
             }
-            if spec.mode == .replace { TextField("Find", text: $spec.find) }
+            if spec.mode == .replace { TextField(L10n.string("Find"), text: $spec.find) }
             TextField(
                 spec.mode == .number
-                    ? "Name" : spec.mode == .add ? "Add after name" : "Replace with",
+                    ? L10n.string("Name")
+                    : spec.mode == .add
+                        ? L10n.string("Add after name") : L10n.string("Replace with"),
                 text: $spec.text)
             if spec.mode == .number {
-                Stepper("Start at \(spec.start)", value: $spec.start, in: 1...999_999)
+                Stepper(
+                    L10n.format("Start at %lld", Int64(spec.start)), value: $spec.start,
+                    in: 1...999_999)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
@@ -178,14 +186,17 @@ struct BatchRenameSheet: View {
             } else {
                 Text(
                     checking
-                        ? "Checking names…"
-                        : "\(moves.count) names will change. File extensions are preserved."
+                        ? L10n.string("Checking names…")
+                        : L10n.format(
+                            "%lld names will change. File extensions are preserved.",
+                            Int64(moves.count))
                 ).foregroundStyle(.secondary).font(.callout)
             }
             HStack {
-                Button("Cancel") { model.batchRename = nil }.keyboardShortcut(.cancelAction)
+                Button(L10n.string("Cancel")) { model.batchRename = nil }.keyboardShortcut(
+                    .cancelAction)
                 Spacer()
-                Button("Rename") {
+                Button(L10n.string("Rename")) {
                     model.batchRename = nil
                     model.perform([.renameBatch(moves)], name: "Rename Items")
                 }.keyboardShortcut(.defaultAction).disabled(

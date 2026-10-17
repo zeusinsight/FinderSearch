@@ -17,91 +17,110 @@ import UniformTypeIdentifiers
         .defaultSize(width: 1050, height: 680).windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Window") { openWindow(id: "browser") }.keyboardShortcut("n")
-                Button("New Tab") { workspace?.newTab() }.keyboardShortcut("t")
-                Button("Reopen Closed Tab") { workspace?.reopenClosedTab() }
+                Button(L10n.string("New Window")) { openWindow(id: "browser") }.keyboardShortcut(
+                    "n")
+                Button(L10n.string("New Tab")) { workspace?.newTab() }.keyboardShortcut("t")
+                Button(L10n.string("Reopen Closed Tab")) { workspace?.reopenClosedTab() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                     .disabled(workspace?.closedTabs.isEmpty != false)
-                Button("New Folder") { model?.newFolder() }.keyboardShortcut(
+                Button(L10n.string("New Folder")) { model?.newFolder() }.keyboardShortcut(
                     "n", modifiers: [.command, .shift]
                 ).disabled(model?.busy != false || model?.canWriteHere != true)
-                Button("Open…") { model?.chooseFolder() }.keyboardShortcut(
+                Button(L10n.string("Open…")) { model?.chooseFolder() }.keyboardShortcut(
                     "o", modifiers: [.command, .option])
             }
             CommandGroup(replacing: .undoRedo) {
-                Button(model?.undoStack.last.map { "Undo \($0.name)" } ?? "Undo") {
+                Button(
+                    model?.undoStack.last.map { L10n.format("Undo %@", L10n.string($0.name)) }
+                        ?? L10n.string("Undo")
+                ) {
                     textOrFile("undo:") { model?.undo() }
                 }.keyboardShortcut("z")
-                Button(model?.redoStack.last.map { "Redo \($0.name)" } ?? "Redo") {
+                Button(
+                    model?.redoStack.last.map { L10n.format("Redo %@", L10n.string($0.name)) }
+                        ?? L10n.string("Redo")
+                ) {
                     textOrFile("redo:") { model?.redo() }
                 }.keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .pasteboard) {
-                Button("Cut") { textOrFile("cut:") { model?.cut() } }.keyboardShortcut("x")
-                Button("Copy") { textOrFile("copy:") { model?.copy() } }.keyboardShortcut("c")
-                Button("Paste Items") { textOrFile("paste:") { model?.paste() } }.keyboardShortcut(
-                    "v")
-                Button("Move Items Here") { model?.paste(move: true) }.keyboardShortcut(
-                    "v", modifiers: [.command, .option]
-                ).disabled(model?.busy != false || model?.canWriteHere != true)
-                Button("Select All") {
+                Button(L10n.string("Cut")) { textOrFile("cut:") { model?.cut() } }.keyboardShortcut(
+                    "x")
+                Button(L10n.string("Copy")) { textOrFile("copy:") { model?.copy() } }
+                    .keyboardShortcut("c")
+                Button(L10n.string("Paste Items")) { textOrFile("paste:") { model?.paste() } }
+                    .keyboardShortcut(
+                        "v")
+                Button(L10n.string("Move Items Here")) { model?.paste(move: true) }
+                    .keyboardShortcut(
+                        "v", modifiers: [.command, .option]
+                    ).disabled(model?.busy != false || model?.canWriteHere != true)
+                Button(L10n.string("Select All")) {
                     textOrFile("selectAll:") {
                         if let model { model.selection = Set(model.sortedHits.map(\.path)) }
                     }
                 }.keyboardShortcut("a")
             }
             CommandGroup(after: .newItem) {
-                Button("Open Selected") { model?.open() }.keyboardShortcut("o").disabled(
-                    model?.selection.isEmpty != false)
-                Button("Rename…") { model?.renameItems() }.disabled(
+                Button(L10n.string("Open Selected")) { model?.open() }.keyboardShortcut("o")
+                    .disabled(
+                        model?.selection.isEmpty != false)
+                Button(L10n.string("Rename…")) { model?.renameItems() }.disabled(
                     model?.selection.isEmpty != false || model?.busy == true)
-                Button("Compress") { model?.compress() }.disabled(
+                Button(L10n.string("Compress")) { model?.compress() }.disabled(
                     model?.selection.isEmpty != false || model?.busy == true
                         || model?.canWriteHere != true)
-                Button("Extract ZIP") { model?.extract() }.disabled(
+                Button(L10n.string("Extract ZIP")) { model?.extract() }.disabled(
                     model?.selectedItems.contains { $0.url.pathExtension.lowercased() == "zip" }
                         != true || model?.busy == true)
-                Button("Duplicate") { model?.duplicate() }.keyboardShortcut("d").disabled(
-                    model?.selection.isEmpty != false || model?.busy == true)
-                Button("Move to Trash") {
+                Button(L10n.string("Duplicate")) { model?.duplicate() }.keyboardShortcut("d")
+                    .disabled(
+                        model?.selection.isEmpty != false || model?.busy == true)
+                Button(L10n.string("Move to Trash")) {
                     textOrFile("deleteToBeginningOfLine:") { model?.trash() }
                 }.keyboardShortcut(.delete)
-                Button("Get Info") { model?.info() }.keyboardShortcut("i").disabled(
+                Button(L10n.string("Get Info")) { model?.info() }.keyboardShortcut("i").disabled(
                     model?.selection.isEmpty != false)
-                Button("Quick Look") { model?.preview = model?.selected }.keyboardShortcut("y")
+                Button(L10n.string("Quick Look")) { model?.preview = model?.selected }
+                    .keyboardShortcut("y")
                     .disabled(model?.selection.isEmpty != false)
             }
-            CommandMenu("Go") {
-                Button("Back") { model?.goBack() }.keyboardShortcut("[").disabled(
+            CommandMenu(L10n.string("Go")) {
+                Button(L10n.string("Back")) { model?.goBack() }.keyboardShortcut("[").disabled(
                     model?.backStack.isEmpty != false)
-                Button("Forward") { model?.goForward() }.keyboardShortcut("]").disabled(
-                    model?.forwardStack.isEmpty != false)
-                Button("Enclosing Folder") {
+                Button(L10n.string("Forward")) { model?.goForward() }.keyboardShortcut("]")
+                    .disabled(
+                        model?.forwardStack.isEmpty != false)
+                Button(L10n.string("Enclosing Folder")) {
                     if let model { model.navigate(model.location.deletingLastPathComponent()) }
                 }.keyboardShortcut(.upArrow)
-                Button("Go to Folder…") { model?.goToFolder() }.keyboardShortcut(
+                Button(L10n.string("Go to Folder…")) { model?.goToFolder() }.keyboardShortcut(
                     "g", modifiers: [.command, .shift])
                 Divider()
                 ForEach(GoDestination.allCases) { destination in
                     Button(destination.title) { model?.sidebar(destination.route) }
-                        .keyboardShortcut(KeyEquivalent(destination.key), modifiers: destination.modifiers)
+                        .keyboardShortcut(
+                            KeyEquivalent(destination.key), modifiers: destination.modifiers
+                        )
                         .disabled(model?.busy != false)
                 }
             }
             CommandGroup(after: .toolbar) {
                 ForEach(FileViewMode.allCases.indices, id: \.self) { index in
-                    Button("As \(FileViewMode.allCases[index].title)") {
+                    Button(L10n.format("As %@", FileViewMode.allCases[index].title)) {
                         model?.viewMode = FileViewMode.allCases[index]
                     }.keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
                 }
-                Button("Show Hidden Files") { model?.showHidden.toggle() }.keyboardShortcut(
-                    ".", modifiers: [.command, .shift])
-                Button("Refresh") { model?.schedule() }.keyboardShortcut("r")
-                Button("Search") {
+                Button(L10n.string("Show Hidden Files")) { model?.showHidden.toggle() }
+                    .keyboardShortcut(
+                        ".", modifiers: [.command, .shift])
+                Button(L10n.string("Refresh")) { model?.schedule() }.keyboardShortcut("r")
+                Button(L10n.string("Search")) {
                     NotificationCenter.default.post(name: .focusSearch, object: nil)
                 }.keyboardShortcut("f")
             }
         }
+        Settings { LanguageSettingsView() }
     }
     private func textOrFile(_ selector: String, action: () -> Void) {
         if NSApp.keyWindow?.firstResponder is NSTextView {
@@ -173,7 +192,9 @@ struct BrowserView: View {
                 pathBar
                 statusBar
             }
-            .navigationTitle(model.isSearch ? "Searching “\(model.query)”" : model.title)
+            .navigationTitle(
+                model.isSearch ? L10n.format("Searching “%@”", model.query) : model.title
+            )
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     ControlGroup {
@@ -181,12 +202,12 @@ struct BrowserView: View {
                             model.goBack()
                         } label: {
                             Image(systemName: "chevron.left")
-                        }.disabled(model.backStack.isEmpty).help("Back")
+                        }.disabled(model.backStack.isEmpty).help(L10n.string("Back"))
                         Button {
                             model.goForward()
                         } label: {
                             Image(systemName: "chevron.right")
-                        }.disabled(model.forwardStack.isEmpty).help("Forward")
+                        }.disabled(model.forwardStack.isEmpty).help(L10n.string("Forward"))
                     }
                 }
                 ToolbarItem {
@@ -196,38 +217,40 @@ struct BrowserView: View {
                 }
                 ToolbarItem {
                     Menu {
-                        Picker("Sort By", selection: $model.sort) {
+                        Picker(L10n.string("Sort By"), selection: $model.sort) {
                             ForEach(FileSort.allCases, id: \.self) { sort in
-                                Text(sort.rawValue).tag(sort)
+                                Text(L10n.string(sort.rawValue)).tag(sort)
                             }
                         }
-                        Toggle("Ascending", isOn: $model.ascending)
-                        Toggle("Show Hidden Files", isOn: $model.showHidden)
+                        Toggle(L10n.string("Ascending"), isOn: $model.ascending)
+                        Toggle(L10n.string("Show Hidden Files"), isOn: $model.showHidden)
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
-                    }.help("Sort")
+                    }.help(L10n.string("Sort"))
                 }
                 ToolbarItem {
                     ShareLink(items: model.selectedItems.map(\.url)) {
                         Image(systemName: "square.and.arrow.up")
-                    }.disabled(model.selection.isEmpty).help("Share")
+                    }.disabled(model.selection.isEmpty).help(L10n.string("Share"))
                 }
                 ToolbarItem {
                     Menu {
-                        ForEach(tags, id: \.0) { name, _ in Button(name) { model.tag(name) } }
+                        ForEach(tags, id: \.0) { name, _ in
+                            Button(L10n.string(name)) { model.tag(name) }
+                        }
                     } label: {
                         Image(systemName: "tag")
-                    }.disabled(model.selection.isEmpty).help("Tags")
+                    }.disabled(model.selection.isEmpty).help(L10n.string("Tags"))
                 }
                 ToolbarItem {
                     Menu {
                         actions
                     } label: {
                         Image(systemName: "ellipsis")
-                    }.help("Actions")
+                    }.help(L10n.string("Actions"))
                 }
             }
-            .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
+            .searchable(text: $model.query, placement: .toolbar, prompt: L10n.string("Search"))
             .searchFocused($keyboardFocus, equals: .search)
             .onSubmit(of: .search) { model.submitSearch() }
         }
@@ -335,15 +358,17 @@ struct BrowserView: View {
     }
     private var searchScopeBar: some View {
         HStack(spacing: 10) {
-            Text("Search:").foregroundStyle(.secondary)
-            Button("This Mac") { model.scope = "" }.buttonStyle(.bordered).tint(
+            Text(L10n.string("Search:")).foregroundStyle(.secondary)
+            Button(L10n.string("This Mac")) { model.scope = "" }.buttonStyle(.bordered).tint(
                 model.scope.isEmpty ? .accentColor : .secondary)
             Button(model.location.lastPathComponent) { model.scope = model.location.path }
                 .buttonStyle(.bordered).tint(model.scope.isEmpty ? .secondary : .accentColor)
             Spacer()
-            Picker("Kind", selection: $model.fileType) {
-                Text("Any Kind").tag(""); Text("Folder").tag("dir"); Text("Document").tag("doc");
-                Text("Image").tag("image"); Text("Movie").tag("video"); Text("Audio").tag("audio")
+            Picker(L10n.string("Kind"), selection: $model.fileType) {
+                Text(L10n.string("Any Kind")).tag(""); Text(L10n.string("Folder")).tag("dir");
+                Text(L10n.string("Document")).tag("doc");
+                Text(L10n.string("Image")).tag("image"); Text(L10n.string("Movie")).tag("video");
+                Text(L10n.string("Audio")).tag("audio")
             }.labelsHidden().frame(width: 130)
         }.font(.system(size: 12)).padding(.horizontal, 16).padding(.vertical, 7).background(
             Color(nsColor: .controlBackgroundColor))
@@ -357,12 +382,13 @@ struct BrowserView: View {
         } else if model.sortedHits.isEmpty {
             ContentUnavailableView {
                 Label(
-                    model.isSearch ? "No Results" : "No Items",
+                    model.isSearch ? L10n.string("No Results") : L10n.string("No Items"),
                     systemImage: model.isSearch ? "magnifyingglass" : "folder")
             } description: {
                 Text(
                     model.isSearch
-                        ? "Try a different name or search location." : "This folder is empty.")
+                        ? L10n.string("Try a different name or search location.")
+                        : L10n.string("This folder is empty."))
             }
         } else {
             switch model.viewMode {
@@ -473,27 +499,29 @@ struct BrowserView: View {
                 if let fraction = progress.fraction {
                     ProgressView(value: fraction).frame(width: 100)
                 }
-                Text("\(model.operationName) · \(progress.item)").lineLimit(1)
+                Text(L10n.format("%@ · %@", L10n.string(model.operationName), progress.item))
+                    .lineLimit(1)
                 if progress.bytes > 0 {
                     Text(
                         ByteCountFormatter.string(fromByteCount: progress.bytes, countStyle: .file)
                     )
                     .monospacedDigit()
                 }
-                Button("Cancel") { model.cancelOperation() }.controlSize(.small)
+                Button(L10n.string("Cancel")) { model.cancelOperation() }.controlSize(.small)
             } else {
                 Text(
                     model.selection.isEmpty
                         ? (model.isSearch && model.hits.count == 500
-                            ? "First 500 matches" : "\(model.sortedHits.count) items")
-                        : "\(model.selection.count) selected")
+                            ? L10n.string("First 500 matches")
+                            : L10n.format("%lld items", Int64(model.sortedHits.count)))
+                        : L10n.format("%lld selected", Int64(model.selection.count)))
             }
-            if model.isSearch { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
+            if model.isSearch { Text(L10n.format("· %.1f ms", model.elapsed)).monospacedDigit() }
             Spacer()
             if model.viewMode == .icons {
                 Image(systemName: "square").font(.system(size: 8));
                 Slider(value: $iconSize, in: 40...96).frame(width: 100).accessibilityLabel(
-                    "Icon Size");
+                    L10n.string("Icon Size"));
                 Image(systemName: "square").font(.system(size: 13))
             }
         }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 14).frame(
@@ -501,88 +529,102 @@ struct BrowserView: View {
         ).background(Color(nsColor: .windowBackgroundColor))
     }
     @ViewBuilder private var backgroundActions: some View {
-        Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
-        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
-        Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
-        Button("Move Items Here") { model.paste(move: true) }.disabled(
+        Button(L10n.string("New Folder")) { model.newFolder() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("New Text File")) { model.newTextFile() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("Paste Items")) { model.paste() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("Move Items Here")) { model.paste(move: true) }.disabled(
             model.busy || !model.canWriteHere)
         Divider()
-        Button("Open in New Tab") { workspace.newTab(model.location) }.disabled(!model.canWriteHere)
-        Button("Add Folder to Sidebar") { workspace.addFavorite(model.location) }.disabled(
+        Button(L10n.string("Open in New Tab")) { workspace.newTab(model.location) }.disabled(
             !model.canWriteHere)
+        Button(L10n.string("Add Folder to Sidebar")) { workspace.addFavorite(model.location) }
+            .disabled(
+                !model.canWriteHere)
         Divider()
-        Menu("View") {
+        Menu(L10n.string("View")) {
             ForEach(FileViewMode.allCases, id: \.self) { mode in
                 Button(mode.title) { model.viewMode = mode }
             }
         }
-        Toggle("Show Hidden Files", isOn: $model.showHidden)
-        Button("Refresh") { model.schedule() }.disabled(model.busy)
+        Toggle(L10n.string("Show Hidden Files"), isOn: $model.showHidden)
+        Button(L10n.string("Refresh")) { model.schedule() }.disabled(model.busy)
     }
     @ViewBuilder private var actions: some View {
-        Button("Open") { model.open() }.disabled(model.selection.isEmpty)
-        Button("Open in New Tab") {
+        Button(L10n.string("Open")) { model.open() }.disabled(model.selection.isEmpty)
+        Button(L10n.string("Open in New Tab")) {
             if let hit = model.selected, hit.isFolder { workspace.newTab(hit.url) }
         }.disabled(model.selected?.isFolder != true)
         Divider()
-        Button("Get Info") { model.info() }.disabled(model.selection.isEmpty)
-        Button("Quick Look") { model.preview = model.selected }.disabled(model.selection.isEmpty)
-        Button("Rename…") { model.renameItems() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Duplicate") { model.duplicate() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Cut") { model.cut() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Copy") { model.copy() }.disabled(model.selection.isEmpty)
-        Button("Copy Path") { model.copyPath() }.disabled(model.selection.isEmpty)
-        Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
-        Button("Move Items Here") { model.paste(move: true) }.disabled(
+        Button(L10n.string("Get Info")) { model.info() }.disabled(model.selection.isEmpty)
+        Button(L10n.string("Quick Look")) { model.preview = model.selected }.disabled(
+            model.selection.isEmpty)
+        Button(L10n.string("Rename…")) { model.renameItems() }.disabled(
+            model.selection.isEmpty || model.busy)
+        Button(L10n.string("Duplicate")) { model.duplicate() }.disabled(
+            model.selection.isEmpty || model.busy)
+        Button(L10n.string("Cut")) { model.cut() }.disabled(model.selection.isEmpty || model.busy)
+        Button(L10n.string("Copy")) { model.copy() }.disabled(model.selection.isEmpty)
+        Button(L10n.string("Copy Path")) { model.copyPath() }.disabled(model.selection.isEmpty)
+        Button(L10n.string("Paste Items")) { model.paste() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("Move Items Here")) { model.paste(move: true) }.disabled(
             model.busy || !model.canWriteHere)
         Divider()
-        Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
-        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
-        Button("Add Folder to Sidebar") {
+        Button(L10n.string("New Folder")) { model.newFolder() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("New Text File")) { model.newTextFile() }.disabled(
+            model.busy || !model.canWriteHere)
+        Button(L10n.string("Add Folder to Sidebar")) {
             workspace.addFavorite(
                 model.selected?.isFolder == true ? model.selected!.url : model.location)
         }
-        Button("Show in Finder") { model.reveal() }.disabled(model.selection.isEmpty)
+        Button(L10n.string("Show in Finder")) { model.reveal() }.disabled(model.selection.isEmpty)
         Divider()
-        Button("Move to Trash") { model.trash() }.disabled(model.selection.isEmpty || model.busy)
+        Button(L10n.string("Move to Trash")) { model.trash() }.disabled(
+            model.selection.isEmpty || model.busy)
     }
     @ViewBuilder private func rowActions(_ hit: Hit) -> some View {
-        Button("Open") { model.open(hit) }
+        Button(L10n.string("Open")) { model.open(hit) }
         OpenWithMenu(model: model, hit: hit)
-        Button("Open in New Tab") { workspace.newTab(hit.url) }.disabled(!hit.isFolder)
-        Button("Quick Look") { model.preview = hit }
-        Button("Open Enclosing Folder") { model.navigate(hit.url.deletingLastPathComponent()) }
+        Button(L10n.string("Open in New Tab")) { workspace.newTab(hit.url) }.disabled(!hit.isFolder)
+        Button(L10n.string("Quick Look")) { model.preview = hit }
+        Button(L10n.string("Open Enclosing Folder")) {
+            model.navigate(hit.url.deletingLastPathComponent())
+        }
         Divider()
-        Button("Get Info") {
+        Button(L10n.string("Get Info")) {
             contextual(hit); model.info()
         }
-        Button("Rename…") {
+        Button(L10n.string("Rename…")) {
             contextual(hit); model.renameItems()
         }
-        Button("Compress") {
+        Button(L10n.string("Compress")) {
             contextual(hit); model.compress()
         }.disabled(model.busy || !model.canWriteHere)
-        Button("Extract ZIP") {
+        Button(L10n.string("Extract ZIP")) {
             contextual(hit); model.extract()
         }.disabled(model.busy || hit.url.pathExtension.lowercased() != "zip")
-        Button("Duplicate") {
+        Button(L10n.string("Duplicate")) {
             contextual(hit); model.duplicate()
         }
-        Button("Copy") {
+        Button(L10n.string("Copy")) {
             contextual(hit); model.copy()
         }
-        Button("Copy Path") {
+        Button(L10n.string("Copy Path")) {
             contextual(hit); model.copyPath()
         }
-        Menu("Tags") {
+        Menu(L10n.string("Tags")) {
             ForEach(tags, id: \.0) { name, _ in
-                Button(name) {
+                Button(L10n.string(name)) {
                     contextual(hit); model.tag(name)
                 }
             }
         }
         Divider()
-        Button("Move to Trash") {
+        Button(L10n.string("Move to Trash")) {
             contextual(hit); model.trash()
         }
     }

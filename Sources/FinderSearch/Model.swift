@@ -13,7 +13,7 @@ enum FileViewMode: String, CaseIterable {
         case .gallery: return "rectangle.bottomthird.inset.filled"
         }
     }
-    var title: String { rawValue.capitalized }
+    var title: String { L10n.string(rawValue.capitalized) }
 }
 enum FileSort: String, CaseIterable {
     case name = "Name", modified = "Date Modified", size = "Size", kind = "Kind", relevance =
@@ -225,9 +225,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     var isSearch: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var title: String {
         route == "recents"
-            ? "Recents"
+            ? L10n.string("Recents")
             : route.hasPrefix("tag:")
-                ? String(route.dropFirst(4))
+                ? SidebarTags.title(for: String(route.dropFirst(4)))
                 : location.lastPathComponent.isEmpty ? "Macintosh HD" : location.lastPathComponent
     }
     var selected: Hit? { selectedItems.first }
@@ -423,7 +423,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     }
                     let reply = try await engine.request(fields)
                     guard reply.ok else {
-                        throw Engine.Failure.message(reply.error ?? "Search failed")
+                        throw Engine.Failure.message(reply.error ?? L10n.string("Search failed"))
                     }
                     result = reply.hits ?? [];
                     if revision == generation { elapsed = Double(reply.took_us ?? 0) / 1000 }
@@ -618,13 +618,15 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             if item.isFolder {
                 navigate(item.url)
             } else if !NSWorkspace.shared.open(item.url) {
-                error = "Could not open ‘\(item.name)’."
+                error = L10n.format("Could not open ‘%@’.", item.name)
             }; return
         }
         for hit in selectedItems {
             guard hit.kind != "pending" else { continue }
             if hit.isFolder && selection.count == 1 { navigate(hit.url); return };
-            if !NSWorkspace.shared.open(hit.url) { error = "Could not open ‘\(hit.name)’." }
+            if !NSWorkspace.shared.open(hit.url) {
+                error = L10n.format("Could not open ‘%@’.", hit.name)
+            }
         }
     }
     func perform(
@@ -765,7 +767,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         guard !busy, let hit = renaming else { return false }
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
             !name.contains(":"), !name.contains("\0")
-        else { error = "Choose a valid filename without slashes or colons."; return false }
+        else {
+            error = L10n.string("Choose a valid filename without slashes or colons."); return false
+        }
         renaming = nil; error = nil
         guard name != hit.name else { return true }
         perform(
@@ -966,7 +970,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                         || tab.location.path.hasPrefix(volume.id + "/"))
             })
         else {
-            reportError("Wait for the file operation to finish before ejecting ‘\(volume.name)’.")
+            reportError(
+                L10n.format(
+                    "Wait for the file operation to finish before ejecting ‘%@’.", volume.name))
             return
         }
         ejectingVolumes.insert(volume.id)
@@ -983,7 +989,9 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 }
                 refreshVolumes()
             } catch {
-                reportError("Could not eject ‘\(volume.name)’: \(error.localizedDescription)")
+                reportError(
+                    L10n.format("Could not eject ‘%@’: %@", volume.name, error.localizedDescription)
+                )
             }
         }
     }

@@ -256,3 +256,11 @@ Right-click locations for navigation actions and, where available, **Eject**.
 Finder tag colors appear beside file names in every view. Tags assigned in FinderSearch and Undo update
 the indicators immediately; hover over the dots to see the tag names.
 Go to Folder supports **Cmd+A**, **Cmd+C**, **Cmd+X**, **Cmd+V**, and Undo/Redo.
+
+## Language
+
+Open **FinderSearch → Settings…** (⌘,) and choose **System Default**, **English**,
+or **简体中文**. Quit and reopen FinderSearch to apply the change to all windows,
+menus, and dialogs. System Default follows the macOS preferred language order,
+with English as the fallback. This uses the native per-app language preference;
+it does not change the system language or other apps.

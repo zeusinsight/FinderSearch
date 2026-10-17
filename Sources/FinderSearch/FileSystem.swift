@@ -20,8 +20,11 @@ extension Hit {
             && !(UTType(filenameExtension: url.pathExtension)?.conforms(to: .package) ?? false)
     }
     var typeName: String {
-        if kind == "dir" { return isFolder ? "Folder" : "Application / Package" }
-        return UTType(filenameExtension: url.pathExtension)?.localizedDescription ?? "Document"
+        if kind == "dir" {
+            return isFolder ? L10n.string("Folder") : L10n.string("Application / Package")
+        }
+        return UTType(filenameExtension: url.pathExtension)?.localizedDescription
+            ?? L10n.string("Document")
     }
     var modified: Date { Date(timeIntervalSince1970: Double(mtime)) }
     static func read(_ url: URL, parent: URL? = nil) throws -> Hit {
@@ -332,7 +335,7 @@ enum LocalFiles {
                 try? $0.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             }
             control?.start(
-                item: source?.lastPathComponent ?? "Creating item…", completed: index,
+                item: source?.lastPathComponent ?? L10n.string("Creating item…"), completed: index,
                 total: operations.count,
                 expectedBytes: size?.isRegularFile == true ? Int64(size?.fileSize ?? 0) : 0)
             do {
@@ -389,7 +392,9 @@ enum LocalFiles {
                             domain: "FinderSearch", code: 1,
                             userInfo: [
                                 NSLocalizedDescriptionKey:
-                                    "An item named ‘\(destination.lastPathComponent)’ already exists."
+                                    L10n.format(
+                                        "An item named ‘%@’ already exists.",
+                                        destination.lastPathComponent)
                             ])
                     }
                     if let control {

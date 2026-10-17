@@ -10,10 +10,10 @@ struct FolderLoadingSkeleton: View {
         VStack(spacing: 0) {
             if mode == .list {
                 HStack(spacing: 0) {
-                    Text("Name").frame(width: 300, alignment: .leading)
-                    Text("Date Modified").frame(width: 180, alignment: .leading)
-                    Text("Size").frame(width: 85, alignment: .leading)
-                    Text("Kind").frame(maxWidth: .infinity, alignment: .leading)
+                    Text(L10n.string("Name")).frame(width: 300, alignment: .leading)
+                    Text(L10n.string("Date Modified")).frame(width: 180, alignment: .leading)
+                    Text(L10n.string("Size")).frame(width: 85, alignment: .leading)
+                    Text(L10n.string("Kind")).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .font(.system(size: 11)).padding(.leading, 18).frame(height: 27)
                 .clipped()
@@ -25,7 +25,7 @@ struct FolderLoadingSkeleton: View {
         .clipped()
         .allowsHitTesting(false)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading files")
+        .accessibilityLabel(L10n.string("Loading files"))
     }
 
     private func draw(context: GraphicsContext, size: CGSize) {

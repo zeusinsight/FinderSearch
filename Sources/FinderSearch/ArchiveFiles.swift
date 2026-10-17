@@ -19,7 +19,7 @@ enum ArchiveFiles {
                 number(tail, $0, 4) == 0x06054b50
                     && $0 + 22 + Int(number(tail, $0 + 20, 2)) == tail.count
             })
-        else { throw Engine.Failure.message("This ZIP archive is incomplete.") }
+        else { throw Engine.Failure.message(L10n.string("This ZIP archive is incomplete.")) }
         let count = number(tail, end + 10, 2)
         let length = number(tail, end + 12, 4), offset = number(tail, end + 16, 4)
         guard number(tail, end + 4, 2) == 0, number(tail, end + 6, 2) == 0,
@@ -27,7 +27,7 @@ enum ArchiveFiles {
             length <= 32 * 1024 * 1024, offset + length <= size - tailSize + UInt64(end)
         else {
             throw Engine.Failure.message(
-                "This archive format is not supported. Use a standard ZIP archive.")
+                L10n.string("This archive format is not supported. Use a standard ZIP archive."))
         }
         try handle.seek(toOffset: offset)
         let central = try handle.read(upToCount: Int(length)) ?? Data()
@@ -35,7 +35,7 @@ enum ArchiveFiles {
         for _ in 0..<count {
             try Task.checkCancellation(); try control?.checkCancellation()
             guard cursor + 46 <= central.count, number(central, cursor, 4) == 0x02014b50 else {
-                throw Engine.Failure.message("This ZIP archive is incomplete.")
+                throw Engine.Failure.message(L10n.string("This ZIP archive is incomplete."))
             }
             let flags = number(central, cursor + 8, 2)
             let nameLength = Int(number(central, cursor + 28, 2))
@@ -44,7 +44,7 @@ enum ArchiveFiles {
             let next = cursor + 46 + nameLength + extraLength + commentLength
             guard next <= central.count, flags & 1 == 0 else {
                 throw Engine.Failure.message(
-                    "Encrypted or incomplete ZIP archives cannot be extracted.")
+                    L10n.string("Encrypted or incomplete ZIP archives cannot be extracted."))
             }
             let nameData = central.subdata(in: cursor + 46..<cursor + 46 + nameLength)
             guard
@@ -53,24 +53,27 @@ enum ArchiveFiles {
                 !name.isEmpty, !name.hasPrefix("/"), !name.contains("\\"), !name.contains("\0"),
                 !name.split(separator: "/").contains("..")
             else {
-                throw Engine.Failure.message("The archive contains an unsafe file path.")
+                throw Engine.Failure.message(
+                    L10n.string("The archive contains an unsafe file path."))
             }
             let mode = number(central, cursor + 38, 4) >> 16 & 0xf000
             guard mode == 0 || mode == 0x8000 || mode == 0x4000 else {
                 throw Engine.Failure.message(
-                    "Archives containing symbolic links or special files cannot be extracted.")
+                    L10n.string(
+                        "Archives containing symbolic links or special files cannot be extracted."))
             }
             let localOffset = number(central, cursor + 42, 4)
             let compressedSize = number(central, cursor + 20, 4)
             guard localOffset < offset, compressedSize != 0xffff_ffff else {
-                throw Engine.Failure.message("This archive format is not supported.")
+                throw Engine.Failure.message(L10n.string("This archive format is not supported."))
             }
             try handle.seek(toOffset: localOffset)
             let local = try handle.read(upToCount: 30) ?? Data()
             guard local.count == 30, number(local, 0, 4) == 0x04034b50,
                 number(local, 6, 2) == flags, number(local, 26, 2) == UInt64(nameLength)
             else {
-                throw Engine.Failure.message("The archive contains inconsistent file headers.")
+                throw Engine.Failure.message(
+                    L10n.string("The archive contains inconsistent file headers."))
             }
             let localName = try handle.read(upToCount: nameLength) ?? Data()
             guard localName == nameData,
@@ -78,12 +81,12 @@ enum ArchiveFiles {
                     <= offset
             else {
                 throw Engine.Failure.message(
-                    "The archive contains inconsistent file paths or data.")
+                    L10n.string("The archive contains inconsistent file paths or data."))
             }
             cursor = next
         }
         guard cursor == central.count else {
-            throw Engine.Failure.message("This ZIP archive is incomplete.")
+            throw Engine.Failure.message(L10n.string("This ZIP archive is incomplete."))
         }
     }
 
@@ -99,7 +102,7 @@ enum ArchiveFiles {
                 parent == path || parent.hasPrefix(prefix)
             {
                 throw Engine.Failure.message(
-                    "An archive cannot be created inside a folder it contains.")
+                    L10n.string("An archive cannot be created inside a folder it contains."))
             }
         }
         let staging = destination.deletingLastPathComponent().appendingPathComponent(

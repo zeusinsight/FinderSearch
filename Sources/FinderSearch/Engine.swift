@@ -60,7 +60,8 @@ final class Engine: SearchService, @unchecked Sendable {
                 !$0.isEmpty && FileManager.default.isExecutableFile(atPath: $0)
             })
         else {
-            throw Failure.message("Search engine missing. Run scripts/build.sh to bundle fsearch.")
+            throw Failure.message(
+                L10n.string("Search engine missing. Run scripts/build.sh to bundle fsearch."))
         }
         // Upstream stdio reuses any running daemon, even after its executable
         // was replaced. Restart our own outdated helper before connecting.
@@ -102,25 +103,28 @@ final class Engine: SearchService, @unchecked Sendable {
                             let data = try JSONSerialization.data(withJSONObject: fields)
                             try self.input?.write(contentsOf: data + Data([10]))
                             guard let output = self.output else {
-                                throw Failure.message("Engine disconnected.")
+                                throw Failure.message(L10n.string("Engine disconnected."))
                             }
                             let deadline = Date().addingTimeInterval(15)
                             while !self.buffer.contains(10) {
                                 try cancellation.check()
                                 let remaining = deadline.timeIntervalSinceNow
                                 guard remaining > 0 else {
-                                    throw Failure.message("Search engine timed out. Try again.")
+                                    throw Failure.message(
+                                        L10n.string("Search engine timed out. Try again."))
                                 }
                                 var fd = pollfd(
                                     fd: output.fileDescriptor, events: Int16(POLLIN), revents: 0)
                                 let result = poll(&fd, 1, Int32(min(remaining, 0.1) * 1000))
                                 if result == 0 { continue }
                                 guard result > 0 else {
-                                    throw Failure.message("Search engine timed out. Try again.")
+                                    throw Failure.message(
+                                        L10n.string("Search engine timed out. Try again."))
                                 }
                                 let chunk = output.availableData
                                 guard !chunk.isEmpty else {
-                                    throw Failure.message("Search engine stopped. Try again.")
+                                    throw Failure.message(
+                                        L10n.string("Search engine stopped. Try again."))
                                 }
                                 self.buffer.append(chunk)
                             }

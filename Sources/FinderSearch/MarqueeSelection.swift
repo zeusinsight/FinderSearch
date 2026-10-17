@@ -47,26 +47,26 @@ extension View {
 private struct MarqueeSelectionModifier: ViewModifier {
     @ObservedObject var model: SearchModel
     let focusFiles: () -> Void
-    @State private var frames: [String: CGRect] = [:]
 
     func body(content: Content) -> some View {
         // Item bounds use the model ID; the modifier is attached to scroll content,
         // making those coordinates stable while the viewport scrolls.
         content.coordinateSpace(name: "marquee-\(model.id)")
-            .onPreferenceChange(MarqueeItemBounds.self) { frames = $0 }
-            .overlay {
+            .overlayPreferenceValue(MarqueeItemBounds.self) { frames in
                 MarqueeOverlay(model: model, frames: frames, focusFiles: focusFiles)
             }
     }
 }
 
 private struct MarqueeOverlay: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     let model: SearchModel
     let frames: [String: CGRect]
     let focusFiles: () -> Void
 
     func makeNSView(context: Context) -> MarqueeSelectionView { MarqueeSelectionView() }
     func updateNSView(_ view: MarqueeSelectionView, context: Context) {
+        view.isInteractionEnabled = isEnabled
         view.configure(model: model, identity: model.route + ":" + model.query)
         view.itemFrames = frames
         view.focusFiles = focusFiles
@@ -77,6 +77,7 @@ private struct MarqueeOverlay: NSViewRepresentable {
 /// Observe only background mouse sequences. Returning nil from hitTest leaves
 /// file clicks, contextual menus and native file dragging with their existing views.
 @MainActor final class MarqueeSelectionView: NSView {
+    var isInteractionEnabled = true { didSet { if !isInteractionEnabled { stop() } } }
     var itemFrames: [String: CGRect] = [:]
     var focusFiles: () -> Void = {}
     weak var table: NSTableView?
@@ -124,7 +125,9 @@ private struct MarqueeOverlay: NSViewRepresentable {
     }
 
     func handle(_ event: NSEvent) -> NSEvent? {
-        guard let model, event.window === window, window != nil, !isHiddenOrHasHiddenAncestor else {
+        guard isInteractionEnabled, let model, event.window === window, window != nil,
+            !isHiddenOrHasHiddenAncestor
+        else {
             return event
         }
         if event.type == .keyDown {

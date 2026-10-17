@@ -99,6 +99,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     {
         didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode") }
     }
+    @Published var iconSize: Double = 64
     @Published var sort: FileSort = .name { didSet { invalidateDerived(preserveOrder: true) } }
     @Published var ascending = true { didSet { invalidateDerived(preserveOrder: true) } }
     @Published var showHidden = false { didSet { invalidateDerived(); schedule() } }
@@ -845,10 +846,13 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
 }
 
 @MainActor final class BrowserWorkspace: ObservableObject {
-    @Published var tabs: [SearchModel] = [SearchModel()] {
-        didSet { observeSession(); saveSession() }
+    @Published var panes: [BrowserPane] = [BrowserPane()] {
+        didSet { if sessionReady { observeSession(); saveSession() } }
     }
-    @Published var selectedTab = UUID()
+    @Published var activePaneID = UUID()
+    @Published var layout: PaneLayout = .single
+    @Published var layoutWeights: [String: [String: [Double]]] = [:]
+    private var sessionReady = false
     @Published private(set) var favorites: [String] = []
     private let favoritesDefaults: UserDefaults
     private var favoritesObserver: AnyCancellable?
@@ -861,7 +865,6 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     let sessionDefaults: UserDefaults?
     var sessionObservers: [AnyCancellable] = []
     private var terminationObserver: AnyCancellable?
-    var closedTabs: [TabSession] = []
     init(
         volumeLoader: @escaping @Sendable () async throws -> [MountedVolume] = {
             try await MountedVolume.load()
@@ -882,35 +885,14 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                 let saved = FavoriteFolders.load(from: self.favoritesDefaults)
                 if self.favorites != saved { self.favorites = saved }
             }
-        if let data = sessionDefaults?.data(forKey: WorkspaceSession.key),
-            let state = try? JSONDecoder().decode(WorkspaceSession.self, from: data),
-            !state.tabs.isEmpty, state.tabs.count <= 50
-        {
-            tabs = state.tabs.map { $0.restore() }
-            selectedTab = tabs[min(max(0, state.selectedIndex), tabs.count - 1)].id
-        } else {
-            selectedTab = tabs[0].id
-        }
+        restoreSession()
+        sessionReady = true
         observeSession()
         terminationObserver = NotificationCenter.default.publisher(
             for: NSApplication.willTerminateNotification
         )
         .sink { [weak self] _ in self?.saveSession() }
         refreshVolumes()
-    }
-    var current: SearchModel { tabs.first { $0.id == selectedTab } ?? tabs[0] }
-    func newTab(_ location: URL? = nil) {
-        let tab = SearchModel(); tab.navigate(location ?? current.location); tabs.append(tab);
-        selectedTab = tab.id
-    }
-    func closeTab(_ id: UUID) {
-        guard tabs.count > 1, tabs.first(where: { $0.id == id })?.busy != true else { return };
-        if let tab = tabs.first(where: { $0.id == id }) {
-            closedTabs.append(TabSession(tab));
-            if closedTabs.count > 20 { closedTabs.removeFirst() }
-        }
-        tabs.removeAll { $0.id == id };
-        if !tabs.contains(where: { $0.id == selectedTab }) { selectedTab = tabs[0].id }
     }
     func addFavorite(_ url: URL) {
         guard url.isFileURL else { return }
@@ -960,7 +942,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             return
         }
         guard
-            !tabs.contains(where: { tab in
+            !allTabs.contains(where: { tab in
                 tab.busy
                     && (tab.location.path == volume.id
                         || tab.location.path.hasPrefix(volume.id + "/"))
@@ -976,7 +958,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             do {
                 try await ejector(volume.url)
                 volumes.removeAll { $0.id == volume.id }
-                for tab in tabs
+                for tab in allTabs
                 where tab.location.path == volume.id || tab.location.path.hasPrefix(volume.id + "/")
                 {
                     tab.navigate(URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))

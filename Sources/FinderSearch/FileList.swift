@@ -4,6 +4,7 @@ import AppKit
 /// Fixed-height AppKit rows avoid SwiftUI Table's automatic-height diffing work
 /// when hundreds of search results are replaced by a cached folder listing.
 @MainActor struct FileList: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     @ObservedObject var model: SearchModel
     @ObservedObject private var clipboard = FileClipboard.shared
     let focusFiles: () -> Void
@@ -77,6 +78,7 @@ import AppKit
         init(_ parent: FileList) { self.parent = parent }
         func update() {
             guard let table else { return }
+            table.marquee.isInteractionEnabled = parent.isEnabled
             table.marquee.configure(
                 model: parent.model, identity: parent.model.route + ":" + parent.model.query)
             table.marquee.focusFiles = parent.focusFiles

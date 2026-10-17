@@ -20,6 +20,9 @@ preview files, and manage your files in a familiar macOS interface.
   filters like `ext:pdf` and `mtime:<7d`.
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
+- **Work across folders.** Twelve pane layouts, including asymmetric splits and
+  four columns, with draggable dividers and independent tabs. Layouts and pane
+  locations restore on relaunch.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,
   tags, sharing, Trash, and undo.
 - **Stay in control.** Transfer progress, cancellation, and clear choices when

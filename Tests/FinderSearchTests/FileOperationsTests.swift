@@ -347,12 +347,12 @@ final class FileOperationsTests: XCTestCase {
     }
 
     @MainActor func testBusyTabCannotClose() {
-        let workspace = BrowserWorkspace(); workspace.newTab(folder)
+        let workspace = BrowserWorkspace(); workspace.activePane.newTab(folder)
         let active = workspace.current; active.busy = true
-        workspace.closeTab(active.id)
-        XCTAssertEqual(workspace.tabs.count, 2)
-        active.busy = false; workspace.closeTab(active.id)
-        XCTAssertEqual(workspace.tabs.count, 1)
+        workspace.activePane.closeTab(active.id)
+        XCTAssertEqual(workspace.activePane.tabs.count, 2)
+        active.busy = false; workspace.activePane.closeTab(active.id)
+        XCTAssertEqual(workspace.activePane.tabs.count, 1)
     }
     func testBackgroundDropNeverConsumesFolderRows() {
         let rect = CGRect(x: 10, y: 40, width: 100, height: 24)

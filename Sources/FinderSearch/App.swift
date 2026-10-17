@@ -18,10 +18,10 @@ import UniformTypeIdentifiers
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Window") { openWindow(id: "browser") }.keyboardShortcut("n")
-                Button("New Tab") { workspace?.newTab() }.keyboardShortcut("t")
-                Button("Reopen Closed Tab") { workspace?.reopenClosedTab() }
+                Button("New Tab") { workspace?.activePane.newTab() }.keyboardShortcut("t")
+                Button("Reopen Closed Tab") { workspace?.activePane.reopenClosedTab() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
-                    .disabled(workspace?.closedTabs.isEmpty != false)
+                    .disabled(workspace?.activePane.closedTabs.isEmpty != false)
                 Button("New Folder") { model?.newFolder() }.keyboardShortcut(
                     "n", modifiers: [.command, .shift]
                 ).disabled(model?.busy != false || model?.canWriteHere != true)
@@ -84,7 +84,9 @@ import UniformTypeIdentifiers
                 Divider()
                 ForEach(GoDestination.allCases) { destination in
                     Button(destination.title) { model?.sidebar(destination.route) }
-                        .keyboardShortcut(KeyEquivalent(destination.key), modifiers: destination.modifiers)
+                        .keyboardShortcut(
+                            KeyEquivalent(destination.key), modifiers: destination.modifiers
+                        )
                         .disabled(model?.busy != false)
                 }
             }
@@ -111,7 +113,11 @@ import UniformTypeIdentifiers
         }
     }
 }
-extension Notification.Name { static let focusSearch = Notification.Name("focusSearch") }
+extension Notification.Name {
+    static let focusSearch = Notification.Name("focusSearch")
+    static let focusBrowserFiles = Notification.Name("focusBrowserFiles")
+    static let blurBrowserFiles = Notification.Name("blurBrowserFiles")
+}
 struct BrowserRoot: View {
     @StateObject private var workspace = BrowserWorkspace(sessionDefaults: .standard)
     var body: some View {
@@ -123,14 +129,9 @@ struct BrowserRoot: View {
 struct BrowserView: View {
     @ObservedObject var workspace: BrowserWorkspace
     @ObservedObject var model: SearchModel
-    private enum KeyboardFocus: Hashable { case files, search }
-    @FocusState private var keyboardFocus: KeyboardFocus?
-    private var searchFocused: Bool { keyboardFocus == .search }
-    @State private var fileNavigationActive = false
-    @State private var keyMonitor: Any?
+    @FocusState private var searchFocused: Bool
     @State private var browserWindow: NSWindow?
-    @State private var iconSize: Double = 64
-    @State private var gridColumns = 5
+    @State private var keyMonitor: Any?
     private let tags = SidebarTags.values
     var body: some View {
         NavigationSplitView {
@@ -140,38 +141,23 @@ struct BrowserView: View {
                     volumes: workspace.volumes, ejectingVolumes: workspace.ejectingVolumes,
                     showDiskAccessHint: model.ready && !model.fullDiskAccess),
                 select: { route in
-                    fileNavigationActive = false; model.sidebar(route)
+                    NotificationCenter.default.post(name: .blurBrowserFiles, object: model)
+                    model.sidebar(route)
                 },
                 removeFavorite: { workspace.removeFavorite($0) },
                 moveFavorites: { workspace.moveFavorites(from: $0, to: $1) },
-                openInNewTab: { workspace.newTab($0) },
+                openInNewTab: { workspace.activePane.newTab($0) },
                 addFavoriteFolders: { await workspace.addFavoriteFolders($0) },
                 eject: { volume in workspace.eject(volume) { model.error = $0 } }
             ).equatable()
         } detail: {
-            VStack(spacing: 0) {
-                if workspace.tabs.count > 1 { BrowserTabBar(workspace: workspace) }
-                if model.isSearch { searchScopeBar }
-                if let error = model.error {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle");
-                        Text(error).font(.callout).textSelection(.enabled); Spacer();
-                        Button {
-                            model.error = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                        }.buttonStyle(.plain)
-                    }.padding(12).background(Color(nsColor: .controlBackgroundColor)); Divider()
-                }
-                fileContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .contextMenu { backgroundActions }
-                    .modifier(SafeBackgroundDropTarget(model: model))
-                    .focusable(model.viewMode == .icons || model.viewMode == .gallery)
-                    .focused($keyboardFocus, equals: .files).focusEffectDisabled()
-                pathBar
-                statusBar
+            ResizablePaneLayout(
+                items: workspace.panes, layout: workspace.layout,
+                weights: Binding(
+                    get: { workspace.layoutWeights[workspace.layout.rawValue] ?? [:] },
+                    set: { workspace.layoutWeights[workspace.layout.rawValue] = $0 })
+            ) { pane in
+                BrowserPaneHost(workspace: workspace, pane: pane)
             }
             .navigationTitle(model.isSearch ? "Searching “\(model.query)”" : model.title)
             .toolbar {
@@ -189,6 +175,7 @@ struct BrowserView: View {
                         }.disabled(model.forwardStack.isEmpty).help("Forward")
                     }
                 }
+                ToolbarItem { PaneLayoutPicker(workspace: workspace) }
                 ToolbarItem {
                     ViewModePicker(selection: $model.viewMode)
                         .frame(width: 150, height: 28)
@@ -228,7 +215,7 @@ struct BrowserView: View {
                 }
             }
             .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
-            .searchFocused($keyboardFocus, equals: .search)
+            .searchFocused($searchFocused)
             .onSubmit(of: .search) { model.submitSearch() }
         }
         .background(BrowserWindowCapture { browserWindow = $0 }.frame(width: 0, height: 0))
@@ -239,74 +226,209 @@ struct BrowserView: View {
                 return true
             }.frame(width: 0, height: 0)
         )
-        .onAppear {
-            model.start()
-            installKeyMonitor()
-        }
+        .onAppear { installKeyMonitor() }
         .onChange(of: model.id) { _, _ in
-            keyboardFocus = nil; fileNavigationActive = false
-            model.start(); installKeyMonitor()
+            searchFocused = false; installKeyMonitor()
         }
         .onDisappear {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }; keyMonitor = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
-            fileNavigationActive = false; model.sort = .relevance; keyboardFocus = .search
+            guard let browserWindow, NSApp.keyWindow === browserWindow else { return }
+            model.sort = .relevance; searchFocused = true
         }
         .onReceive(
             NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)
-        ) { _ in workspace.refreshVolumes() }
+        ) { _ in
+            workspace.refreshVolumes()
+        }
         .onReceive(
             NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)
-        ) { _ in workspace.refreshVolumes() }
+        ) { _ in
+            workspace.refreshVolumes()
+        }
+        .sheet(
+            item: Binding(
+                get: { workspace.allTabs.compactMap(\.conflict).first },
+                set: { _ in })
+        ) { conflict in
+            if let owner = workspace.allTabs.first(where: { $0.conflict?.id == conflict.id }) {
+                ConflictSheet(conflict: conflict) { choice, all in
+                    owner.resolveConflict(choice, applyToAll: all)
+                }
+                .interactiveDismissDisabled()
+            }
+        }
+        .sheet(
+            item: Binding(
+                get: { workspace.allTabs.first { $0.batchRename != nil } },
+                set: { if $0 == nil { workspace.allTabs.forEach { $0.batchRename = nil } } })
+        ) { owner in
+            if let request = owner.batchRename { BatchRenameSheet(model: owner, request: request) }
+        }
+        .sheet(
+            item: Binding(
+                get: { workspace.allTabs.first { $0.preview != nil } },
+                set: { if $0 == nil { workspace.allTabs.forEach { $0.preview = nil } } })
+        ) { owner in QuickLookBrowser(model: owner) }
+    }
+    private func installKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard let browserWindow, NSApp.keyWindow === browserWindow, !browserWindow.isSheet
+            else { return event }
+            if let command = TabShortcut.command(for: event) {
+                if command == .new {
+                    workspace.activePane.newTab()
+                } else {
+                    workspace.activePane.reopenClosedTab()
+                }
+                return nil
+            }
+            if searchFocused && event.keyCode == 125 && !model.sortedHits.isEmpty {
+                searchFocused = false
+                NotificationCenter.default.post(name: .focusBrowserFiles, object: model)
+                model.select(model.sortedHits[0], extending: false, toggling: false)
+                model.selectionNavigation.send((model.sortedHits[0].path, false)); return nil
+            }
+            return event
+        }
+    }
+    @ViewBuilder private var actions: some View {
+        Button("Open") { model.open() }.disabled(model.selection.isEmpty)
+        Button("Open in New Tab") {
+            if let hit = model.selected, hit.isFolder { workspace.activePane.newTab(hit.url) }
+        }.disabled(model.selected?.isFolder != true)
+        Divider()
+        Button("Get Info") { model.info() }.disabled(model.selection.isEmpty)
+        Button("Quick Look") { model.preview = model.selected }.disabled(model.selection.isEmpty)
+        Button("Rename…") { model.renameItems() }.disabled(model.selection.isEmpty || model.busy)
+        Button("Duplicate") { model.duplicate() }.disabled(model.selection.isEmpty || model.busy)
+        Button("Cut") { model.cut() }.disabled(model.selection.isEmpty || model.busy)
+        Button("Copy") { model.copy() }.disabled(model.selection.isEmpty)
+        Button("Copy Path") { model.copyPath() }.disabled(model.selection.isEmpty)
+        Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
+        Button("Move Items Here") { model.paste(move: true) }.disabled(
+            model.busy || !model.canWriteHere)
+        Divider()
+        Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
+        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
+        Button("Add Folder to Sidebar") {
+            workspace.addFavorite(
+                model.selected?.isFolder == true ? model.selected!.url : model.location)
+        }
+        Button("Show in Finder") { model.reveal() }.disabled(model.selection.isEmpty)
+        Divider()
+        Button("Move to Trash") { model.trash() }.disabled(model.selection.isEmpty || model.busy)
+    }
+}
+
+struct BrowserPaneHost: View {
+    @ObservedObject var workspace: BrowserWorkspace
+    @ObservedObject var pane: BrowserPane
+    var body: some View {
+        BrowserPaneView(workspace: workspace, pane: pane, model: pane.current)
+    }
+}
+
+struct BrowserPaneView: View {
+    @ObservedObject var workspace: BrowserWorkspace
+    @ObservedObject var pane: BrowserPane
+    @ObservedObject var model: SearchModel
+    private enum KeyboardFocus: Hashable { case files }
+    @FocusState private var keyboardFocus: KeyboardFocus?
+    @State private var fileNavigationActive = false
+    @State private var keyMonitor: Any?
+    @State private var browserWindow: NSWindow?
+    @State private var gridColumns = 5
+    private let tags = SidebarTags.values
+    var body: some View {
+        VStack(spacing: 0) {
+            if pane.tabs.count > 1 { BrowserTabBar(pane: pane) }
+            if model.isSearch { searchScopeBar }
+            if let error = model.error {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle");
+                    Text(error).font(.callout).textSelection(.enabled); Spacer();
+                    Button {
+                        model.error = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                    }.buttonStyle(.plain)
+                }.padding(12).background(Color(nsColor: .controlBackgroundColor)); Divider()
+            }
+            fileContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .contextMenu { backgroundActions }
+                .modifier(SafeBackgroundDropTarget(model: model))
+                .focusable(model.viewMode == .icons || model.viewMode == .gallery)
+                .focused($keyboardFocus, equals: .files).focusEffectDisabled()
+            pathBar
+            statusBar
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay {
+            if workspace.layout != .single {
+                Rectangle().strokeBorder(
+                    workspace.activePaneID == pane.id ? Color.accentColor.opacity(0.7) : .clear,
+                    lineWidth: 1.5
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        .background(BrowserWindowCapture { browserWindow = $0 }.frame(width: 0, height: 0))
+        .overlay(
+            PaneActivationTarget {
+                workspace.activatePane(pane.id); fileNavigationActive = true
+            }
+        )
+        .onAppear {
+            model.start(); installKeyMonitor()
+        }
+        .onChange(of: model.id) { _, _ in
+            keyboardFocus = nil; fileNavigationActive = false
+            model.start(); installKeyMonitor()
+        }
+        .onChange(of: workspace.activePaneID) { _, id in
+            if id != pane.id { keyboardFocus = nil; fileNavigationActive = false }
+        }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }; keyMonitor = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusBrowserFiles)) { notification in
+            guard let target = notification.object as? SearchModel, target.id == model.id else {
+                return
+            }
+            focusFiles()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .blurBrowserFiles)) { notification in
+            guard let target = notification.object as? SearchModel, target.id == model.id else {
+                return
+            }
+            keyboardFocus = nil; fileNavigationActive = false
+        }
         .onChange(of: model.viewMode) { _, _ in
             model.cancelRename()
             model.extraHits = []; model.selection.formIntersection(Set(model.hits.map(\.path)))
         }
         .onChange(of: model.renaming) { _, hit in
-            if hit != nil {
-                keyboardFocus = nil; fileNavigationActive = false
-            } else if !searchFocused {
-                fileNavigationActive = true
-            }
+            keyboardFocus = nil; fileNavigationActive = hit == nil
         }
-        .onChange(of: keyboardFocus) { _, focus in
-            if focus == .search { fileNavigationActive = false }
-        }
-        .onChange(of: model.query) { _, text in
+        .onChange(of: model.query) { _, _ in
             if model.isSearch && model.sort != .relevance { model.sort = .relevance }
         }
         .task(id: model.id) { await model.monitor() }
-        .sheet(item: $model.conflict) { conflict in
-            ConflictSheet(conflict: conflict) { choice, all in
-                model.resolveConflict(choice, applyToAll: all)
-            }
-            .interactiveDismissDisabled()
-        }
-        .sheet(item: $model.batchRename) { request in
-            BatchRenameSheet(model: model, request: request)
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { model.preview != nil }, set: { if !$0 { model.preview = nil } })
-        ) {
-            QuickLookBrowser(model: model)
-        }
     }
     private func installKeyMonitor() {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard let browserWindow, NSApp.keyWindow === browserWindow else { return event }
-            if let command = TabShortcut.command(for: event), !browserWindow.isSheet {
-                if command == .new { workspace.newTab() } else { workspace.reopenClosedTab() }
-                return nil
-            }
-            if searchFocused && event.keyCode == 125 && !model.sortedHits.isEmpty {
-                focusFiles(); model.select(model.sortedHits[0], extending: false, toggling: false)
-                model.selectionNavigation.send((model.sortedHits[0].path, false)); return nil
-            }
+            guard workspace.activePaneID == pane.id, let browserWindow,
+                NSApp.keyWindow === browserWindow
+            else { return event }
             guard NSApp.keyWindow?.isSheet != true, model.preview == nil,
-                fileNavigationActive && !searchFocused,
+                fileNavigationActive,
                 !(NSApp.keyWindow?.firstResponder is NSTextView)
             else { return event }
             if event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
@@ -334,26 +456,44 @@ struct BrowserView: View {
         }
     }
     private var searchScopeBar: some View {
-        HStack(spacing: 10) {
-            Text("Search:").foregroundStyle(.secondary)
-            Button("This Mac") { model.scope = "" }.buttonStyle(.bordered).tint(
-                model.scope.isEmpty ? .accentColor : .secondary)
-            Button(model.location.lastPathComponent) { model.scope = model.location.path }
-                .buttonStyle(.bordered).tint(model.scope.isEmpty ? .secondary : .accentColor)
-            Spacer()
-            Picker("Kind", selection: $model.fileType) {
-                Text("Any Kind").tag(""); Text("Folder").tag("dir"); Text("Document").tag("doc");
-                Text("Image").tag("image"); Text("Movie").tag("video"); Text("Audio").tag("audio")
-            }.labelsHidden().frame(width: 130)
-        }.font(.system(size: 12)).padding(.horizontal, 16).padding(.vertical, 7).background(
-            Color(nsColor: .controlBackgroundColor))
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                Text("Search:").foregroundStyle(.secondary)
+                scopeButtons
+                Spacer()
+                kindPicker.frame(width: 130)
+            }
+            HStack(spacing: 6) {
+                Menu {
+                    scopeButtons
+                } label: {
+                    Text(model.scope.isEmpty ? "This Mac" : model.location.lastPathComponent)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                kindPicker.frame(maxWidth: 90)
+            }
+        }
+        .font(.system(size: 12)).padding(.horizontal, 8).padding(.vertical, 7)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+    @ViewBuilder private var scopeButtons: some View {
+        Button("This Mac") { model.scope = "" }.buttonStyle(.bordered)
+            .tint(model.scope.isEmpty ? .accentColor : .secondary)
+        Button(model.location.lastPathComponent) { model.scope = model.location.path }
+            .buttonStyle(.bordered).tint(model.scope.isEmpty ? .secondary : .accentColor)
+    }
+    private var kindPicker: some View {
+        Picker("Kind", selection: $model.fileType) {
+            Text("Any Kind").tag(""); Text("Folder").tag("dir"); Text("Document").tag("doc");
+            Text("Image").tag("image"); Text("Movie").tag("video"); Text("Audio").tag("audio")
+        }.labelsHidden()
     }
     @ViewBuilder private var fileContent: some View {
         if model.viewMode == .columns && model.canWriteHere {
             ColumnBrowser(model: model, focusFiles: { focusFiles() }, rowMenu: rowActions).id(
                 model.id)
         } else if (model.loading || model.searching) && model.sortedHits.isEmpty {
-            FolderLoadingSkeleton(mode: model.viewMode, iconSize: iconSize)
+            FolderLoadingSkeleton(mode: model.viewMode, iconSize: model.iconSize)
         } else if model.sortedHits.isEmpty {
             ContentUnavailableView {
                 Label(
@@ -380,17 +520,17 @@ struct BrowserView: View {
             iconScroll(minHeight: geometry.size.height)
                 .onAppear { updateColumns(geometry.size.width) }
                 .onChange(of: geometry.size.width) { _, width in updateColumns(width) }
-                .onChange(of: iconSize) { _, _ in updateColumns(geometry.size.width) }
+                .onChange(of: model.iconSize) { _, _ in updateColumns(geometry.size.width) }
         }
     }
     private func updateColumns(_ width: Double) {
-        gridColumns = max(1, Int((width - 36) / (iconSize + 69)))
+        gridColumns = max(1, Int((width - 36) / (model.iconSize + 69)))
     }
     private func iconScroll(minHeight: Double) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: iconSize + 55), spacing: 14)],
+                    columns: [GridItem(.adaptive(minimum: model.iconSize + 55), spacing: 14)],
                     alignment: .leading, spacing: 18
                 ) {
                     ForEach(model.sortedHits) { hit in iconCell(hit) }
@@ -406,8 +546,8 @@ struct BrowserView: View {
     }
     private func iconCell(_ hit: Hit) -> some View {
         VStack(spacing: 6) {
-            FileThumbnail(hit: hit, size: iconSize).frame(
-                width: iconSize + 10, height: iconSize + 10)
+            FileThumbnail(hit: hit, size: model.iconSize).frame(
+                width: model.iconSize + 10, height: model.iconSize + 10)
             FileNameLabel(model: model, hit: hit, lineLimit: 2, centered: true)
                 .frame(height: 32, alignment: .top)
         }
@@ -429,7 +569,7 @@ struct BrowserView: View {
     }
     private var fileTable: some View {
         FileList(
-            model: model, focusFiles: focusFiles, newTab: { workspace.newTab($0) },
+            model: model, focusFiles: focusFiles, newTab: { pane.newTab($0) },
             addFavorite: { workspace.addFavorite($0) })
     }
     private var pathBar: some View {
@@ -465,40 +605,47 @@ struct BrowserView: View {
         }.background(Color(nsColor: .windowBackgroundColor))
     }
     private var statusBar: some View {
-        HStack {
-            if model.loading || model.searching || model.sorting || model.busy {
-                ProgressView().controlSize(.mini)
-            }
-            if let progress = model.operationProgress {
-                if let fraction = progress.fraction {
-                    ProgressView(value: fraction).frame(width: 100)
+        GeometryReader { geometry in
+            HStack {
+                if model.loading || model.searching || model.sorting || model.busy {
+                    ProgressView().controlSize(.mini)
                 }
-                Text("\(model.operationName) · \(progress.item)").lineLimit(1)
-                if progress.bytes > 0 {
+                if let progress = model.operationProgress {
+                    if let fraction = progress.fraction, geometry.size.width > 340 {
+                        ProgressView(value: fraction).frame(width: 100)
+                    }
+                    Text("\(model.operationName) · \(progress.item)").lineLimit(1)
+                    if progress.bytes > 0 && geometry.size.width > 420 {
+                        Text(
+                            ByteCountFormatter.string(
+                                fromByteCount: progress.bytes, countStyle: .file)
+                        )
+                        .monospacedDigit()
+                    }
+                    Button("Cancel") { model.cancelOperation() }.controlSize(.small).fixedSize()
+                } else {
                     Text(
-                        ByteCountFormatter.string(fromByteCount: progress.bytes, countStyle: .file)
-                    )
-                    .monospacedDigit()
+                        model.selection.isEmpty
+                            ? (model.isSearch && model.hits.count == 500
+                                ? "First 500 matches" : "\(model.sortedHits.count) items")
+                            : "\(model.selection.count) selected")
                 }
-                Button("Cancel") { model.cancelOperation() }.controlSize(.small)
-            } else {
-                Text(
-                    model.selection.isEmpty
-                        ? (model.isSearch && model.hits.count == 500
-                            ? "First 500 matches" : "\(model.sortedHits.count) items")
-                        : "\(model.selection.count) selected")
-            }
-            if model.isSearch { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
-            Spacer()
-            if model.viewMode == .icons {
-                Image(systemName: "square").font(.system(size: 8));
-                Slider(value: $iconSize, in: 40...96).frame(width: 100).accessibilityLabel(
-                    "Icon Size");
-                Image(systemName: "square").font(.system(size: 13))
-            }
-        }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 14).frame(
-            height: 28
-        ).background(Color(nsColor: .windowBackgroundColor))
+                if model.isSearch && geometry.size.width > 280 {
+                    Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit()
+                }
+                Spacer()
+                if model.viewMode == .icons && geometry.size.width > 340 {
+                    Image(systemName: "square").font(.system(size: 8));
+                    Slider(value: $model.iconSize, in: 40...96).frame(width: 100)
+                        .accessibilityLabel(
+                            "Icon Size");
+                    Image(systemName: "square").font(.system(size: 13))
+                }
+            }.lineLimit(1).font(.system(size: 11)).foregroundStyle(.secondary)
+                .padding(.horizontal, geometry.size.width > 260 ? 14 : 8).frame(
+                    height: 28
+                )
+        }.frame(height: 28).background(Color(nsColor: .windowBackgroundColor))
     }
     @ViewBuilder private var backgroundActions: some View {
         Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
@@ -507,7 +654,7 @@ struct BrowserView: View {
         Button("Move Items Here") { model.paste(move: true) }.disabled(
             model.busy || !model.canWriteHere)
         Divider()
-        Button("Open in New Tab") { workspace.newTab(model.location) }.disabled(!model.canWriteHere)
+        Button("Open in New Tab") { pane.newTab(model.location) }.disabled(!model.canWriteHere)
         Button("Add Folder to Sidebar") { workspace.addFavorite(model.location) }.disabled(
             !model.canWriteHere)
         Divider()
@@ -519,37 +666,10 @@ struct BrowserView: View {
         Toggle("Show Hidden Files", isOn: $model.showHidden)
         Button("Refresh") { model.schedule() }.disabled(model.busy)
     }
-    @ViewBuilder private var actions: some View {
-        Button("Open") { model.open() }.disabled(model.selection.isEmpty)
-        Button("Open in New Tab") {
-            if let hit = model.selected, hit.isFolder { workspace.newTab(hit.url) }
-        }.disabled(model.selected?.isFolder != true)
-        Divider()
-        Button("Get Info") { model.info() }.disabled(model.selection.isEmpty)
-        Button("Quick Look") { model.preview = model.selected }.disabled(model.selection.isEmpty)
-        Button("Rename…") { model.renameItems() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Duplicate") { model.duplicate() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Cut") { model.cut() }.disabled(model.selection.isEmpty || model.busy)
-        Button("Copy") { model.copy() }.disabled(model.selection.isEmpty)
-        Button("Copy Path") { model.copyPath() }.disabled(model.selection.isEmpty)
-        Button("Paste Items") { model.paste() }.disabled(model.busy || !model.canWriteHere)
-        Button("Move Items Here") { model.paste(move: true) }.disabled(
-            model.busy || !model.canWriteHere)
-        Divider()
-        Button("New Folder") { model.newFolder() }.disabled(model.busy || !model.canWriteHere)
-        Button("New Text File") { model.newTextFile() }.disabled(model.busy || !model.canWriteHere)
-        Button("Add Folder to Sidebar") {
-            workspace.addFavorite(
-                model.selected?.isFolder == true ? model.selected!.url : model.location)
-        }
-        Button("Show in Finder") { model.reveal() }.disabled(model.selection.isEmpty)
-        Divider()
-        Button("Move to Trash") { model.trash() }.disabled(model.selection.isEmpty || model.busy)
-    }
     @ViewBuilder private func rowActions(_ hit: Hit) -> some View {
         Button("Open") { model.open(hit) }
         OpenWithMenu(model: model, hit: hit)
-        Button("Open in New Tab") { workspace.newTab(hit.url) }.disabled(!hit.isFolder)
+        Button("Open in New Tab") { pane.newTab(hit.url) }.disabled(!hit.isFolder)
         Button("Quick Look") { model.preview = hit }
         Button("Open Enclosing Folder") { model.navigate(hit.url.deletingLastPathComponent()) }
         Divider()
@@ -590,6 +710,7 @@ struct BrowserView: View {
         if !model.selection.contains(hit.path) { model.selection = [hit.path] }
     }
     private func focusFiles() {
+        workspace.activatePane(pane.id)
         keyboardFocus = nil; fileNavigationActive = true
         if NSApp.keyWindow?.firstResponder is NSTextView {
             NSApp.keyWindow?.makeFirstResponder(nil)

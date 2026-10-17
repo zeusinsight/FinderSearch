@@ -363,10 +363,10 @@ final class QualityOfLifeTests: XCTestCase {
         }
         XCTAssertEqual(changes, 0, "Scrolling must not redraw the whole browser")
         try await Task.sleep(for: .milliseconds(350))
-        let data = try XCTUnwrap(defaults.data(forKey: WorkspaceSession.key))
-        let saved = try JSONDecoder().decode(WorkspaceSession.self, from: data)
-        XCTAssertEqual(saved.tabs[0].scrollAnchor, "/fixture/file-199.png")
-        XCTAssertEqual(saved.tabs[0].scrollOffset, 7)
+        let data = try XCTUnwrap(defaults.data(forKey: PaneWorkspaceSession.key))
+        let saved = try JSONDecoder().decode(PaneWorkspaceSession.self, from: data)
+        XCTAssertEqual(saved.panes[0].tabs[0].scrollAnchor, "/fixture/file-199.png")
+        XCTAssertEqual(saved.panes[0].tabs[0].scrollOffset, 7)
         let restored = BrowserWorkspace(
             volumeLoader: { [] }, volumeEjector: { _ in }, sessionDefaults: defaults)
         XCTAssertEqual(restored.current.scrollAnchor, model.scrollAnchor)
@@ -383,21 +383,22 @@ final class QualityOfLifeTests: XCTestCase {
         workspace.current.viewMode = .list; workspace.current.sort = .size
         workspace.current.ascending = false; workspace.current.scrollAnchor = hit.path
         workspace.current.scrollOffset = 7
-        workspace.newTab(folder); workspace.current.viewMode = .gallery
-        let first = workspace.tabs[0].id, second = workspace.tabs[1].id
-        workspace.moveTab(first, to: second)
-        XCTAssertEqual(workspace.tabs.map(\.id), [second, first])
-        workspace.selectedTab = first; workspace.saveSession()
+        workspace.activePane.newTab(folder); workspace.current.viewMode = .gallery
+        let first = workspace.activePane.tabs[0].id, second = workspace.activePane.tabs[1].id
+        workspace.activePane.moveTab(first, to: second)
+        XCTAssertEqual(workspace.activePane.tabs.map(\.id), [second, first])
+        workspace.activePane.selectedTab = first; workspace.saveSession()
         let restored = BrowserWorkspace(sessionDefaults: defaults)
-        XCTAssertEqual(restored.tabs.count, 2)
+        XCTAssertEqual(restored.activePane.tabs.count, 2)
         XCTAssertEqual(restored.current.location.path, folder.path)
         XCTAssertEqual(restored.current.viewMode, .list)
         XCTAssertEqual(restored.current.sort, .size)
         XCTAssertFalse(restored.current.ascending)
         XCTAssertEqual(restored.current.scrollAnchor, hit.path)
         XCTAssertEqual(restored.current.scrollOffset, 7)
-        restored.closeTab(restored.current.id); XCTAssertEqual(restored.tabs.count, 1)
-        restored.reopenClosedTab(); XCTAssertEqual(restored.tabs.count, 2)
+        restored.activePane.closeTab(restored.current.id);
+        XCTAssertEqual(restored.activePane.tabs.count, 1)
+        restored.activePane.reopenClosedTab(); XCTAssertEqual(restored.activePane.tabs.count, 2)
         XCTAssertEqual(restored.current.viewMode, .list)
         XCTAssertEqual(restored.current.scrollAnchor, hit.path)
     }

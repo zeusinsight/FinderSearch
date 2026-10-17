@@ -114,6 +114,18 @@ not intentionally download cloud file contents.
 - **Search:** Command-F; requests begin 50 ms after typing stops; Return submits a pending search immediately. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
+- **Pane layouts:** the toolbar's Pane Layout button offers a single pane, two
+  columns, two rows, a four-pane grid, one left/two right, two left/one right,
+  one top/two bottom, two top/one bottom, three rows, three columns, four columns,
+  and four rows. Drag any divider to resize its neighbors. Click a pane to make
+  it active; the shared sidebar, toolbar, search field and keyboard commands
+  follow that pane. Each pane has independent tabs and supports the existing
+  four file views and file drag/drop actions.
+  Switching layouts preserves open directories, selections, scrolling and tab
+  history. Reducing the pane count keeps the active pane visible and parks the
+  others; increasing it again brings them back. A layout cannot hide a pane
+  while it has a file operation or editor open. Layout, per-layout divider
+  proportions, active pane, tabs and browsing settings restore after restarting.
 - **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
   yet support content-query syntax. Footer timing measures engine work, excluding
   debounce, IPC, and rendering.

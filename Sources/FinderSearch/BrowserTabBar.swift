@@ -1,25 +1,25 @@
 import SwiftUI
 
 struct BrowserTabBar: View {
-    @ObservedObject var workspace: BrowserWorkspace
+    @ObservedObject var pane: BrowserPane
     var body: some View {
         GeometryReader { geometry in
             let width = min(
-                220, max(120, (geometry.size.width - 44) / CGFloat(workspace.tabs.count)))
+                220, max(120, (geometry.size.width - 44) / CGFloat(pane.tabs.count)))
             HStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal) {
                         HStack(spacing: 4) {
-                            ForEach(workspace.tabs) { tab in
-                                BrowserTab(workspace: workspace, model: tab, width: width).id(
+                            ForEach(pane.tabs) { tab in
+                                BrowserTab(pane: pane, model: tab, width: width).id(
                                     tab.id)
                             }
                         }.padding(.horizontal, 6).padding(.vertical, 5)
                     }.scrollIndicators(.hidden)
-                        .onChange(of: workspace.selectedTab) { _, id in proxy.scrollTo(id) }
+                        .onChange(of: pane.selectedTab) { _, id in proxy.scrollTo(id) }
                 }
                 Button {
-                    workspace.newTab()
+                    pane.newTab()
                 } label: {
                     Image(systemName: "plus").font(.system(size: 12, weight: .medium))
                         .frame(width: 32, height: 30).contentShape(Rectangle())
@@ -33,15 +33,15 @@ struct BrowserTabBar: View {
 }
 
 private struct BrowserTab: View {
-    @ObservedObject var workspace: BrowserWorkspace
+    @ObservedObject var pane: BrowserPane
     @ObservedObject var model: SearchModel
     let width: CGFloat
     @State private var hovering = false
-    private var selected: Bool { workspace.selectedTab == model.id }
+    private var selected: Bool { pane.selectedTab == model.id }
     var body: some View {
         HStack(spacing: 0) {
             Button {
-                workspace.selectedTab = model.id
+                pane.selectedTab = model.id
             } label: {
                 HStack(spacing: 7) {
                     Image(
@@ -56,7 +56,7 @@ private struct BrowserTab: View {
                     .contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
             Button {
-                workspace.closeTab(model.id)
+                pane.closeTab(model.id)
             } label: {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary).frame(width: 28, height: 30)
@@ -77,19 +77,19 @@ private struct BrowserTab: View {
             }
             .contentShape(Rectangle()).onHover { hovering = $0 }
             .help(model.location.path)
-            .overlay { MiddleClickTarget { workspace.closeTab(model.id) } }
+            .overlay { MiddleClickTarget { pane.closeTab(model.id) } }
             .draggable(model.id.uuidString)
             .dropDestination(for: String.self) { values, _ in
                 guard let value = values.first, let id = UUID(uuidString: value),
-                    workspace.tabs.contains(where: { $0.id == id })
+                    pane.tabs.contains(where: { $0.id == id })
                 else { return false }
-                workspace.moveTab(id, to: model.id); return true
+                pane.moveTab(id, to: model.id); return true
             }
             .contextMenu {
-                Button("New Tab") { workspace.newTab() }
-                Button("Close Tab") { workspace.closeTab(model.id) }.disabled(model.busy)
-                Button("Reopen Closed Tab") { workspace.reopenClosedTab() }.disabled(
-                    workspace.closedTabs.isEmpty)
+                Button("New Tab") { pane.newTab() }
+                Button("Close Tab") { pane.closeTab(model.id) }.disabled(model.busy)
+                Button("Reopen Closed Tab") { pane.reopenClosedTab() }.disabled(
+                    pane.closedTabs.isEmpty)
             }
     }
 }

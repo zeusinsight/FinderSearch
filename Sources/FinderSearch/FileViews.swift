@@ -334,7 +334,8 @@ struct ColumnBrowser<RowMenu: View>: View {
             model.scrollAnchor = hit.path
             columns[index].scrollAnchor = hit.path
             guard model.renaming == nil else { return }
-            present(hit, at: index, openFolder: !request.extending)
+            present(
+                hit, at: index, openFolder: !request.extending && !model.selectingFilenamePrefix)
         }
         .task(id: model.location) {
             guard lastNavigation?.path != model.location.path else { return }

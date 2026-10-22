@@ -68,6 +68,10 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     }
     var scrollOffset: Double = 0
     private var selectionAnchor: String?
+    private(set) var selectingFilenamePrefix = false
+    private var filenamePrefix = ""
+    private var filenamePrefixTime: TimeInterval = 0
+    private var filenamePrefixContext = ""
     @Published var searching = false
     @Published var loading = false
     @Published private(set) var sorting = false
@@ -292,7 +296,36 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             focusedPath = hit.path; selection = [hit.path]; selectionAnchor = hit.path
         }
     }
+    /// Finder-style incremental selection, independent of the search query.
+    func selectFilenamePrefix(_ text: String, at time: TimeInterval) {
+        let context = route + ":" + query
+        if context != filenamePrefixContext || time - filenamePrefixTime > 1 {
+            filenamePrefix = ""
+        }
+        filenamePrefixContext = context
+        filenamePrefixTime = time
+        let cycling = !filenamePrefix.isEmpty && filenamePrefix == text
+        if !cycling { filenamePrefix += text }
+        let items = sortedHits
+        guard !items.isEmpty else { return }
+        let start = cycling ? ((focusedPath.flatMap { rowsByPath[$0] } ?? -1) + 1) : 0
+        for offset in items.indices {
+            let hit = items[(start + offset) % items.count]
+            if hit.name.range(
+                of: filenamePrefix, options: [.anchored, .caseInsensitive, .diacriticInsensitive])
+                != nil
+            {
+                select(hit, extending: false, toggling: false)
+                selectingFilenamePrefix = true
+                defer { selectingFilenamePrefix = false }
+                selectionNavigation.send((hit.path, false))
+                return
+            }
+        }
+    }
+    func resetFilenamePrefix() { filenamePrefix = "" }
     func moveSelection(by delta: Int, extending: Bool) {
+        resetFilenamePrefix()
         let items = sortedHits
         guard !items.isEmpty else { return }
         let rows = rowsByPath

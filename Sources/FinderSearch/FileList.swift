@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 /// Fixed-height AppKit rows avoid SwiftUI Table's automatic-height diffing work
 /// when hundreds of search results are replaced by a cached folder listing.
@@ -72,9 +73,22 @@ import AppKit
         private weak var renameField: RenameTextField?
         private var actions: [Int: @MainActor () -> Void] = [:]
         var scrollObserver: NSObjectProtocol?
+        private var navigation: AnyCancellable?
         private var restoredRoute: String?
         private var displayedTab: UUID?
-        init(_ parent: FileList) { self.parent = parent }
+        init(_ parent: FileList) {
+            self.parent = parent
+            super.init()
+            observeNavigation()
+        }
+        private func observeNavigation() {
+            navigation = parent.model.selectionNavigation.sink { [weak self] request in
+                guard let self, let table = self.table,
+                    let row = self.rowByPath[request.path]
+                else { return }
+                table.scrollRowToVisible(row)
+            }
+        }
         func update() {
             guard let table else { return }
             table.marquee.configure(
@@ -95,6 +109,7 @@ import AppKit
             if switchingTab {
                 renameField?.cancelEditing(); renameField = nil
                 displayedTab = parent.model.id; restoredRoute = nil
+                observeNavigation()
             }
             if let hit = parent.model.renaming, let row = rowByPath[hit.path] {
                 updating = true; defer { updating = false }

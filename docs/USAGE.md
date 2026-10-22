@@ -256,3 +256,5 @@ Right-click locations for navigation actions and, where available, **Eject**.
 Finder tag colors appear beside file names in every view. Tags assigned in FinderSearch and Undo update
 the indicators immediately; hover over the dots to see the tag names.
 Go to Folder supports **Cmd+A**, **Cmd+C**, **Cmd+X**, **Cmd+V**, and Undo/Redo.
+
+When the file browser has focus, type a filename prefix to select and reveal a matching item. Type quickly to extend the prefix; pause for one second to start another. Repeat a single letter to cycle through matches. Arrow keys move the selection, and Shift-arrow extends it. These keys leave search and rename text fields available for editing.

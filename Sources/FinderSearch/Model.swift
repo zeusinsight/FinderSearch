@@ -56,6 +56,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             selectionAnchor = focusedPath
         }
     }
+    var pendingTransferSelection: (folder: URL, paths: Set<String>)?
     var marqueeSelecting = false
     @Published var focusedPath: String?
     /// Explicit navigation and editing requests scroll; mouse selection does not.
@@ -332,6 +333,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             }
         }
         cancelRename()
+        pendingTransferSelection = nil
         mutationError = nil
         prefetchTask?.cancel()
         saveDefaultSnapshot()
@@ -459,6 +461,20 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     Set(
                         (sortedHits + extraHits.filter { showHidden || !$0.name.hasPrefix(".") })
                             .map(\.path)))
+                if !searchingNow, let pending = pendingTransferSelection,
+                    pending.folder == folder
+                {
+                    pendingTransferSelection = nil
+                    let paths = pending.paths.intersection(Set(sortedHits.map(\.path)))
+                    if !paths.isEmpty {
+                        selection = paths
+                        if let first = sortedHits.first(where: { paths.contains($0.path) }) {
+                            scrollAnchor = first.path; scrollOffset = 0
+                            // Reveal dropped folders without opening them in column view.
+                            selectionNavigation.send((first.path, true))
+                        }
+                    }
+                }
                 loading = false; searching = false
                 if !searchingNow {
                     saveDefaultSnapshot()

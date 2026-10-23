@@ -160,6 +160,51 @@ final class FileOperationsTests: XCTestCase {
         for _ in 0..<100 { if !model.busy { return }; try await Task.sleep(for: .milliseconds(20)) }
         XCTFail("File operation timed out")
     }
+    @MainActor func testDroppedPDFTransfersBetweenFoldersAndSupportsUndo() async throws {
+        let downloads = folder.appendingPathComponent("Downloads")
+        let biz = folder.appendingPathComponent("biz")
+        for directory in [downloads, biz] {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false)
+        }
+        let source = downloads.appendingPathComponent("correspondence with spaces.pdf")
+        let destination = biz.appendingPathComponent(source.lastPathComponent)
+        try Data("fixture PDF".utf8).write(to: source)
+        let model = SearchModel()
+        model.location = biz; model.route = biz.path
+        let unrelated = biz.appendingPathComponent("existing.txt")
+        try Data("existing".utf8).write(to: unrelated)
+        model.hits = [try Hit.read(unrelated)]
+        for move in [true, false] {
+            model.selection = [unrelated.path]
+            let transferred = expectation(description: move ? "Drop moves PDF" : "Drop copies PDF")
+            XCTAssertTrue(
+                FileDrops.load([NSItemProvider(object: source as NSURL)]) { urls in
+                    model.transfer(urls, to: biz, move: move) { _ in transferred.fulfill() }
+                })
+            await fulfillment(of: [transferred], timeout: 5)
+            XCTAssertNil(model.error)
+            XCTAssertEqual(try Data(contentsOf: destination), Data("fixture PDF".utf8))
+            XCTAssertEqual(FileManager.default.fileExists(atPath: source.path), !move)
+            for _ in 0..<100 {
+                if !model.loading && model.selection == [destination.path] { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(model.selection, [destination.path])
+            XCTAssertEqual(model.selectedItems.map(\.path), [destination.path])
+            XCTAssertEqual(model.scrollAnchor, destination.path)
+            model.schedule()
+            for _ in 0..<100 {
+                if !model.loading { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(model.selection, [destination.path])
+            model.undo(); try await waitForOperation(model)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+
     @MainActor func testSlowCommandPreparationKeepsMainActorAvailable() async throws {
         let model = SearchModel()
         model.navigate(folder)

@@ -86,6 +86,49 @@ final class WorkflowFixTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 2)
     }
 
+    @MainActor func testFileDropLoadsPDFURLsAndRejectsText() async throws {
+        let file = folder.appendingPathComponent("correspondence with spaces.pdf")
+        try Data("fixture".utf8).write(to: file)
+        let loaded = expectation(description: "File URLs loaded")
+        XCTAssertTrue(
+            FileDrops.load([NSItemProvider(object: file as NSURL)]) { urls in
+                XCTAssertEqual(urls, [file])
+                loaded.fulfill()
+            })
+        XCTAssertFalse(
+            FileDrops.load([NSItemProvider(object: "text" as NSString)]) { _ in
+                XCTFail("Text is not a file drop")
+            })
+        await fulfillment(of: [loaded], timeout: 2)
+    }
+
+    func testListDropsResolveWindowBackgroundAndFolders() {
+        let file = Hit(path: "/fixture/file.pdf", kind: "file", size: 1, mtime: 1, score: 0)
+        let child = Hit(path: "/fixture/biz", kind: "dir", size: 0, mtime: 1, score: 0)
+        let location = URL(fileURLWithPath: "/fixture")
+        for items in [[], [file, child]] {
+            XCTAssertEqual(
+                FileListDrop.destination(
+                    row: -1, operation: .on, items: items, location: location), location)
+            XCTAssertEqual(
+                FileListDrop.destination(
+                    row: items.count, operation: .above, items: items, location: location), location
+            )
+            XCTAssertNil(
+                FileListDrop.destination(
+                    row: -1, operation: .on, items: items, location: nil))
+        }
+        XCTAssertEqual(
+            FileListDrop.destination(
+                row: 1, operation: .on, items: [file, child], location: nil), child.url)
+        XCTAssertNil(
+            FileListDrop.destination(
+                row: 0, operation: .on, items: [file, child], location: location))
+        XCTAssertEqual(
+            FileListDrop.destination(
+                row: 1, operation: .above, items: [file, child], location: location), location)
+    }
+
     @MainActor func testTagViewsRefreshAfterTaggingUndoAndReuse() async throws {
         let url = folder.appendingPathComponent("tagged.txt"),
             other = folder.appendingPathComponent("other.txt")

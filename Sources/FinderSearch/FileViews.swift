@@ -266,8 +266,10 @@ struct ColumnBrowser<RowMenu: View>: View {
                                                 .background(
                                                     columns.indices.contains(index)
                                                         && (model.selection.contains(hit.path)
-                                                            || (column.url.path != model.location.path
-                                                                && columns[index].selected == hit.path))
+                                                            || (column.url.path
+                                                                != model.location.path
+                                                                && columns[index].selected
+                                                                    == hit.path))
                                                         ? Color.accentColor.opacity(0.22)
                                                         : Color.clear
                                                 )
@@ -292,6 +294,7 @@ struct ColumnBrowser<RowMenu: View>: View {
                                         }))
                             }
                         }.frame(width: 235).id(column.id)
+                            .modifier(ColumnBackgroundDropTarget(folder: column.url, model: model))
                         Divider()
                     }
                     if let hit = model.selected, !hit.isFolder {
@@ -422,19 +425,30 @@ struct FolderDropTarget: ViewModifier {
 @MainActor enum FileDrops {
     static func accept(_ providers: [NSItemProvider], into folder: URL, model: SearchModel) -> Bool
     {
-        guard !model.busy, !providers.isEmpty else { return false }
+        guard !model.busy else { return false }
         let move = !NSEvent.modifierFlags.contains(.option)
+        return load(providers) { urls in
+            model.transfer(urls, to: folder, move: move)
+        }
+    }
+
+    @discardableResult
+    static func load(
+        _ providers: [NSItemProvider], receive: @escaping @MainActor ([URL]) -> Void
+    ) -> Bool {
+        let providers = providers.filter { $0.canLoadObject(ofClass: NSURL.self) }
+        guard !providers.isEmpty else { return false }
         Task { @MainActor in
             var urls: [URL] = []
             for provider in providers {
                 let url: URL? = await withCheckedContinuation { continuation in
-                    _ = provider.loadObject(ofClass: URL.self) { value, _ in
-                        continuation.resume(returning: value)
+                    _ = provider.loadObject(ofClass: NSURL.self) { value, _ in
+                        continuation.resume(returning: (value as? NSURL).map { $0 as URL })
                     }
                 }
-                if let url { urls.append(url) }
+                if let url, url.isFileURL { urls.append(url) }
             }
-            model.transfer(urls, to: folder, move: move)
+            if !urls.isEmpty { receive(urls) }
         }
         return true
     }
@@ -464,7 +478,7 @@ struct SafeBackgroundDropTarget: ViewModifier {
         content.coordinateSpace(name: model.id)
             .onPreferenceChange(DropBoundsKey.self) { bounds = $0 }
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers, point in
-                guard model.canWriteHere, model.viewMode == .icons,
+                guard model.canWriteHere, model.viewMode == .icons || model.viewMode == .gallery,
                     Self.isBackground(point, bounds: bounds, mode: model.viewMode)
                 else { return false }
                 return FileDrops.accept(providers, into: model.location, model: model)
@@ -472,10 +486,25 @@ struct SafeBackgroundDropTarget: ViewModifier {
     }
     static func isBackground(_ point: CGPoint, bounds: [CGRect], mode: FileViewMode) -> Bool {
         switch mode {
-        case .icons: return !bounds.contains { $0.contains(point) }
+        case .icons, .gallery: return !bounds.contains { $0.contains(point) }
         case .list:
             return point.y > 24 && !bounds.contains { point.y >= $0.minY && point.y <= $0.maxY }
-        case .columns, .gallery: return false
+        case .columns: return false
         }
+    }
+}
+
+private struct ColumnBackgroundDropTarget: ViewModifier {
+    let folder: URL
+    @ObservedObject var model: SearchModel
+    @State private var bounds: [CGRect] = []
+    func body(content: Content) -> some View {
+        content.coordinateSpace(name: model.id)
+            .onPreferenceChange(DropBoundsKey.self) { bounds = $0 }
+            .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers, point in
+                guard !bounds.contains(where: { point.y >= $0.minY && point.y <= $0.maxY })
+                else { return false }
+                return FileDrops.accept(providers, into: folder, model: model)
+            }
     }
 }

@@ -92,6 +92,7 @@ struct BrowserSidebar: View, Equatable {
     let moveFavorites: (IndexSet, Int) -> Void
     let openInNewTab: (URL) -> Void
     let addFavoriteFolders: ([URL]) async -> Bool
+    let dropFiles: ([NSItemProvider], URL) -> Bool
     @State private var folderDropTargeted = false
     let eject: (MountedVolume) -> Void
     private let home = NSHomeDirectory()
@@ -185,6 +186,7 @@ struct BrowserSidebar: View, Equatable {
                             .accessibilityLabel(ejectLabel)
                         }
                     }.tag(volume.id)
+                        .modifier(SidebarFolderDrop(path: volume.id, accept: dropFiles))
                         .contextMenu {
                             folderActions(volume.id)
                             if volume.canEject {
@@ -231,5 +233,23 @@ struct BrowserSidebar: View, Equatable {
 
     private func row(_ name: String, _ symbol: String, _ path: String) -> some View {
         Label(name, systemImage: symbol).tag(path)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .modifier(SidebarFolderDrop(path: path, accept: dropFiles))
+    }
+}
+
+/// Row drops transfer files; drops between rows still add folder shortcuts.
+private struct SidebarFolderDrop: ViewModifier {
+    let path: String
+    let accept: ([NSItemProvider], URL) -> Bool
+    @State private var targeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(targeted ? Color.accentColor.opacity(0.22) : Color.clear)
+            .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
+                accept(providers, URL(fileURLWithPath: path, isDirectory: true))
+            }
     }
 }

@@ -146,6 +146,7 @@ struct BrowserView: View {
                 moveFavorites: { workspace.moveFavorites(from: $0, to: $1) },
                 openInNewTab: { workspace.newTab($0) },
                 addFavoriteFolders: { await workspace.addFavoriteFolders($0) },
+                dropFiles: { FileDrops.accept($0, into: $1, model: model) },
                 eject: { volume in workspace.eject(volume) { model.error = $0 } }
             ).equatable()
         } detail: {

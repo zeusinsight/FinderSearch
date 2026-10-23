@@ -125,7 +125,22 @@ extension SearchModel {
                 }
                 busy = false; operationProgress = nil
                 if !operations.isEmpty {
-                    perform(operations, name: move ? "Move" : "Copy", completion: completion)
+                    perform(operations, name: move ? "Move" : "Copy") { successful in
+                        if self.canWriteHere, self.location == folder {
+                            let paths = Set(successful.compactMap { operation -> String? in
+                                switch operation {
+                                case .move(_, let destination), .copy(_, let destination),
+                                    .replace(_, let destination, _):
+                                    return destination.path
+                                default: return nil
+                                }
+                            })
+                            if !paths.isEmpty {
+                                self.pendingTransferSelection = (folder, paths)
+                            }
+                        }
+                        completion?(successful)
+                    }
                 }
             } catch is CancellationError {
                 resolveConflict(.cancel); busy = false; operationProgress = nil

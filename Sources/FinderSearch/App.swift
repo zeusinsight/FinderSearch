@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 @main struct FinderSearchApp: App {
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var searchHistory = SearchHistory.shared
     @FocusedObject private var model: SearchModel?
     @FocusedObject private var workspace: BrowserWorkspace?
     var body: some Scene {
@@ -102,6 +103,11 @@ import UniformTypeIdentifiers
                 }.keyboardShortcut("f")
             }
         }
+        Settings {
+            Form {
+                Toggle("Save Search History", isOn: $searchHistory.enabled)
+            }.formStyle(.grouped).frame(width: 360, height: 100)
+        }
     }
     private func textOrFile(_ selector: String, action: () -> Void) {
         if NSApp.keyWindow?.firstResponder is NSTextView {
@@ -123,6 +129,7 @@ struct BrowserRoot: View {
 struct BrowserView: View {
     @ObservedObject var workspace: BrowserWorkspace
     @ObservedObject var model: SearchModel
+    @ObservedObject private var searchHistory = SearchHistory.shared
     private enum KeyboardFocus: Hashable { case files, search }
     @FocusState private var keyboardFocus: KeyboardFocus?
     private var searchFocused: Bool { keyboardFocus == .search }
@@ -229,7 +236,20 @@ struct BrowserView: View {
             }
             .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
             .searchFocused($keyboardFocus, equals: .search)
-            .onSubmit(of: .search) { model.submitSearch() }
+            .searchSuggestions {
+                if searchHistory.enabled && !searchHistory.queries.isEmpty {
+                    ForEach(searchHistory.queries, id: \.self) { query in
+                        Text(query).searchCompletion(query)
+                    }
+                    Divider()
+                    Button("Clear Search History") { searchHistory.clear() }
+                        .submitScope()
+                }
+            }
+            .onSubmit(of: .search) {
+                searchHistory.record(model.query)
+                model.submitSearch()
+            }
         }
         .background(BrowserWindowCapture { browserWindow = $0 }.frame(width: 0, height: 0))
         .background(

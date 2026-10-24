@@ -18,6 +18,10 @@ preview files, and manage your files in a familiar macOS interface.
 
 - **Find files quickly.** Fuzzy matching, relevance ranking, folder scope, and
   filters like `ext:pdf` and `mtime:<7d`.
+- **Reuse recent searches.** Click the search field for native history suggestions
+  and **Clear Search History**. Press Return to save a query; up to 20 are kept locally.
+  **Save Search History** in Settings is on by default; disabling it hides
+  suggestions and stops new entries while preserving existing history.
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,

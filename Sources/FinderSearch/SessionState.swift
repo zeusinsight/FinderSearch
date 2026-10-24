@@ -1,6 +1,37 @@
 import AppKit
 import Combine
 
+@MainActor final class SearchHistory: ObservableObject {
+    static let shared = SearchHistory()
+    static let key = "recentSearches.v1"
+    static let enabledKey = "saveSearchHistory"
+    @Published var enabled: Bool {
+        didSet { defaults.set(enabled, forKey: Self.enabledKey) }
+    }
+    @Published private(set) var queries: [String]
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        enabled = defaults.object(forKey: Self.enabledKey) as? Bool ?? true
+        queries = defaults.stringArray(forKey: Self.key) ?? []
+    }
+
+    func record(_ query: String) {
+        guard enabled else { return }
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        queries = [query] + queries.filter { $0 != query }
+        queries = Array(queries.prefix(20))
+        defaults.set(queries, forKey: Self.key)
+    }
+
+    func clear() {
+        queries = []
+        defaults.removeObject(forKey: Self.key)
+    }
+}
+
 struct TabSession: Codable, Equatable {
     var path: String
     var route: String

@@ -18,6 +18,11 @@ preview files, and manage your files in a familiar macOS interface.
 
 - **Find files quickly.** Fuzzy matching, relevance ranking, folder scope, and
   filters like `ext:pdf` and `mtime:<7d`.
+- **Choose list columns.** Right-click a column header to show or hide columns,
+  or use **Show Columns** in the list context menu. Choices persist locally and
+  apply to all list windows; the Name column stays visible.
+  Optional Date Created, Date Added and Date Last Opened columns load in the background;
+  added/opened dates use Spotlight metadata and show a dash when unavailable.
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,

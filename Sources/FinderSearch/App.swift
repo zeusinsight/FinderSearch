@@ -102,6 +102,7 @@ import UniformTypeIdentifiers
                 }.keyboardShortcut("f")
             }
         }
+        Settings { DocumentSettingsView() }
     }
     private func textOrFile(_ selector: String, action: () -> Void) {
         if NSApp.keyWindow?.firstResponder is NSTextView {
@@ -340,6 +341,10 @@ struct BrowserView: View {
                 model.scope.isEmpty ? .accentColor : .secondary)
             Button(model.location.lastPathComponent) { model.scope = model.location.path }
                 .buttonStyle(.bordered).tint(model.scope.isEmpty ? .secondary : .accentColor)
+            Picker("Search In", selection: $model.searchContents) {
+                Text("File Name").tag(false)
+                Text("File Contents").tag(true)
+            }.labelsHidden().frame(width: 130)
             Spacer()
             Picker("Kind", selection: $model.fileType) {
                 Text("Any Kind").tag(""); Text("Folder").tag("dir"); Text("Document").tag("doc");
@@ -410,6 +415,9 @@ struct BrowserView: View {
                 width: iconSize + 10, height: iconSize + 10)
             FileNameLabel(model: model, hit: hit, lineLimit: 2, centered: true)
                 .frame(height: 32, alignment: .top)
+            if let snippet = hit.contentSnippet {
+                Text(snippet).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            }
         }
         .modifier(CutAppearance(path: hit.path))
         .padding(6).frame(maxWidth: .infinity)
@@ -488,7 +496,10 @@ struct BrowserView: View {
                             ? "First 500 matches" : "\(model.sortedHits.count) items")
                         : "\(model.selection.count) selected")
             }
-            if model.isSearch { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
+            if model.isSearch {
+                if model.searchContents && model.contentIndexing { Text("Indexing file contents…") }
+                else { Text(String(format: "· %.1f ms", model.elapsed)).monospacedDigit() }
+            }
             Spacer()
             if model.viewMode == .icons {
                 Image(systemName: "square").font(.system(size: 8));

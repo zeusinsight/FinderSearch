@@ -189,6 +189,7 @@ import AppKit
                 tableView.makeView(withIdentifier: tableColumn.identifier, owner: self) as? FileCell
                 ?? FileCell(identifier: tableColumn.identifier, withIcon: key == "name")
             cell.path = hit.path
+            cell.toolTip = hit.contentSnippet
             cell.alphaValue = parent.clipboard.opacity(for: hit.path)
             switch key {
             case "name": cell.textField?.stringValue = hit.name

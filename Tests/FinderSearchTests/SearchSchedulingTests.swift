@@ -2,6 +2,26 @@ import XCTest
 @testable import FinderSearch
 
 final class SearchSchedulingTests: XCTestCase {
+    @MainActor func testContentSearchUsesLiteralTextAndContinuesPages() async throws {
+        let requested = expectation(description: "Both content pages sent")
+        requested.expectedFulfillmentCount = 2
+        let engine = ContentSearchEngine(requested: requested)
+        let model = SearchModel(engine: engine, searchDebounce: .seconds(60))
+        model.searchContents = true
+        model.query = "秦前坤.*"
+        model.submitSearch()
+        await fulfillment(of: [requested], timeout: 1)
+        try await Task.sleep(for: .milliseconds(100))
+        let patterns = await engine.patterns
+        let cursors = await engine.cursors
+        XCTAssertEqual(patterns, ["秦前坤.*", "秦前坤.*"])
+        XCTAssertEqual(cursors, [nil, 12])
+        XCTAssertEqual(model.hits.map(\.name), ["first.docx", "second.xlsx"])
+        XCTAssertEqual(model.hits.first?.contentSnippet, "秦前坤.* in a paragraph")
+        XCTAssertEqual(model.hits.first?.size, 1024)
+        XCTAssertFalse(model.searching)
+    }
+
     @MainActor func testRapidEditsSendOnlyLatestQuery() async throws {
         let requested = expectation(description: "Latest query sent")
         let engine = ScheduledSearchEngine(requested: requested)
@@ -52,6 +72,26 @@ final class SearchSchedulingTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(model.hits.first?.name, "new")
         XCTAssertFalse(model.searching)
+    }
+}
+
+private actor ContentSearchEngine: SearchService {
+    let requested: XCTestExpectation
+    var patterns: [String] = []
+    var cursors: [UInt64?] = []
+    init(requested: XCTestExpectation) { self.requested = requested }
+    func request(_ fields: [String: Any]) async throws -> Reply {
+        XCTAssertEqual(fields["op"] as? String, "grep")
+        XCTAssertEqual(fields["mode"] as? String, "literal")
+        XCTAssertEqual(fields["q"] as? String, "")
+        patterns.append(fields["pattern"] as? String ?? "")
+        cursors.append(fields["cursor"] as? UInt64)
+        let first = patterns.count == 1
+        let json = first
+            ? #"{"ok":true,"files":[{"path":"/fixture/first.docx","size":1024,"mtime":1,"matches":[{"text":"秦前坤.* in a paragraph"}]}],"complete":false,"next":12}"#
+            : #"{"ok":true,"files":[{"path":"/fixture/first.docx","matches":[]},{"path":"/fixture/second.xlsx","size":2048,"mtime":1,"matches":[{"text":"秦前坤.* in a cell"}]}],"complete":true}"#
+        requested.fulfill()
+        return try JSONDecoder().decode(Reply.self, from: Data(json.utf8))
     }
 }
 

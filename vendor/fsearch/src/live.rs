@@ -177,12 +177,14 @@ impl Live {
     }
 
     fn drop_over_subtree(&mut self, path: &[u8]) {
+        self.priors.remove(path);
         if let Some(o) = self.over.remove(path) {
             self.flat.clear(o);
         }
         let (lo, hi) = subtree_bounds(path);
         let keys: Vec<Vec<u8>> = self.over.range(lo..hi).map(|(k, _)| k.clone()).collect();
         for k in keys {
+            self.priors.remove(&k);
             if let Some(o) = self.over.remove(&k) {
                 self.flat.clear(o);
             }
@@ -223,6 +225,10 @@ impl Live {
         if recursive {
             if f.path != b"/" {
                 f.attrs = lstat(&f.path);
+                // Flagged as a scan would, so the mounted volume isn't crawled.
+                if let Some(a) = f.attrs.as_mut().filter(|a| a.kind & 3 == KIND_DIR && walk::is_mount(&f.path)) {
+                    a.kind |= FLAG_MOUNT;
+                }
                 if f.attrs.is_some_and(|a| a.kind & 3 == KIND_DIR && a.kind & FLAG_MOUNT == 0) {
                     f.scans.insert(f.path.clone(), walk::scan(&f.path, 4));
                 }
@@ -313,6 +319,11 @@ impl Live {
                     let c = c as usize;
                     let was_kind = self.base.kind(c);
                     if was_kind & 3 != now.kind & 3 {
+                        // A folder no more: what was added in it goes too.
+                        if was_kind & 3 == KIND_DIR {
+                            self.trees.push(child.clone());
+                            self.drop_over_subtree(&child);
+                        }
                         self.kill_subtree(c as u32);
                         let scan = f.scans.remove(&child);
                         self.add_new(child, now, scan);
@@ -324,6 +335,9 @@ impl Live {
                 Some(None) => {
                     let old = self.over[&child];
                     if old.kind & 3 != now.kind & 3 {
+                        if old.kind & 3 == KIND_DIR {
+                            self.trees.push(child.clone());
+                        }
                         self.drop_over_subtree(&child);
                         let scan = f.scans.remove(&child);
                         self.add_new(child, now, scan);
@@ -338,7 +352,8 @@ impl Live {
             match c {
                 Some(c) => {
                     if self.base.kind(c as usize) & 3 == KIND_DIR {
-                        self.trees.push(child);
+                        self.trees.push(child.clone());
+                        self.drop_over_subtree(&child);
                     }
                     self.kill_subtree(c)
                 }
@@ -514,4 +529,69 @@ pub fn lstat(path: &[u8]) -> Option<OEnt> {
         _ => walk::KIND_OTHER,
     };
     Some(OEnt::new(path, kind, st.st_size as u64, st.st_mtime.clamp(0, u32::MAX as i64) as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An index of `root` with real paths: the folders above it as one-entry
+    /// listings, then a scan of it.
+    fn base_for(root: &[u8]) -> Index {
+        let comps: Vec<&[u8]> = root.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
+        let k = comps.len() as u32;
+        let above = |(i, c): (usize, &&[u8])| {
+            let e = RawEnt { name_off: 0, name_len: c.len() as u16, kind: KIND_DIR, size: 0, mtime: 0, child: i as u32 + 1 };
+            Listing { id: i as u32, names: c.to_vec(), ents: vec![e] }
+        };
+        let mut ls: Vec<Listing> = comps.iter().enumerate().map(above).collect();
+        for mut l in walk::scan(root, 2) {
+            l.id += k;
+            for e in l.ents.iter_mut().filter(|e| e.child != NONE) {
+                e.child += k;
+            }
+            ls.push(l);
+        }
+        Index::build(ls, 0, 0, b"")
+    }
+
+    /// A folder deleted (or made a file) while only its parent's event
+    /// arrives: what was added inside it since the save goes too, and its
+    /// content is resynced.
+    #[test]
+    fn folder_gone_takes_what_was_added() {
+        let d = std::env::temp_dir().join(format!("fsearch-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["sub/old", "swap/old"] {
+            std::fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let d = d.canonicalize().unwrap();
+        let root = d.as_os_str().as_encoded_bytes().to_vec();
+        let mut live = Live::new(base_for(&root));
+        for f in ["sub", "swap"] {
+            std::fs::write(d.join(f).join("new"), "x").unwrap();
+            live.apply_dir(&join(&root, f.as_bytes()), false);
+        }
+        std::fs::remove_dir_all(d.join("sub")).unwrap();
+        std::fs::remove_dir_all(d.join("swap")).unwrap();
+        std::fs::write(d.join("swap"), "x").unwrap();
+        live.trees.clear();
+        live.apply_dir(&root, false);
+        let _ = std::fs::remove_dir_all(&d);
+        let rel = |k: &Vec<u8>| String::from_utf8_lossy(&k[root.len()..]).into_owned();
+        assert_eq!(live.over.keys().filter(|k| k.starts_with(&root)).map(rel).collect::<Vec<_>>(), ["/swap"]);
+        live.trees.sort();
+        assert_eq!(live.trees.iter().map(rel).collect::<Vec<_>>(), ["/sub", "/swap"]);
+    }
+
+    /// A recursive event on a mount point (/dev here) doesn't crawl the
+    /// mounted volume: it is an entry flagged as a scan flags it.
+    #[test]
+    fn mount_point_not_crawled() {
+        let live = Live::new(Index::build(vec![Listing::default()], 0, 0, b""));
+        let f = live.fetch(b"/dev", true);
+        assert!(f.scans.is_empty() && f.attrs.is_some_and(|a| a.kind & FLAG_MOUNT != 0));
+        assert!(!walk::is_mount(b"/usr/bin") && !walk::is_mount(b"/Users") && walk::is_mount(b"/System/Volumes/Data"));
+    }
 }

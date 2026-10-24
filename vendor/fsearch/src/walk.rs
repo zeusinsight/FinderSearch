@@ -180,7 +180,14 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     Some(l)
 }
 
-const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+// O_NOFOLLOW only checks the last component of a full path; O_NOFOLLOW_ANY
+// refuses a link anywhere in it. It needs macOS 11, so Apple Silicon only.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const NOFOLLOW: i32 = libc::O_NOFOLLOW_ANY;
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) const NOFOLLOW: i32 = libc::O_NOFOLLOW;
+
+const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | NOFOLLOW | libc::O_CLOEXEC;
 
 /// Directory fd shared by the tasks that still need to openat() a child.
 struct Fd(i32);
@@ -261,6 +268,18 @@ fn entry_count(dir: i32, name: &CString) -> Option<u32> {
     let mut b = [0u32; 2];
     let r = unsafe { libc::getattrlistat(dir, name.as_ptr(), (&raw mut al).cast(), b.as_mut_ptr().cast(), 8, libc::FSOPT_NOFOLLOW as _) };
     (r == 0).then_some(b[1])
+}
+
+/// Is the folder at `path` a mount point, as a listing of its parent flags
+/// one (FLAG_MOUNT)?
+pub fn is_mount(path: &[u8]) -> bool {
+    let Ok(c) = CString::new(path) else { return false };
+    let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
+    al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+    al.dirattr = libc::ATTR_DIR_MOUNTSTATUS;
+    let mut b = [0u32; 2];
+    let r = unsafe { libc::getattrlist(c.as_ptr(), (&raw mut al).cast(), b.as_mut_ptr().cast(), 8, libc::FSOPT_NOFOLLOW as _) };
+    r == 0 && b[1] & (libc::DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0
 }
 
 fn push(l: Listing, ctx: &Ctx) {

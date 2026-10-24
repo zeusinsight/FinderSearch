@@ -622,6 +622,10 @@ impl Index {
             k += 1;
             d = self.dir_parent(d as usize);
         }
+        // Deeper than that (rare): the folders above, first.
+        if d != 0 {
+            self.path(self.dir_entry(d as usize) as usize, out);
+        }
         for &e in chain[..k].iter().rev() {
             out.push(b'/');
             out.extend_from_slice(&self.name(e as usize));
@@ -1368,5 +1372,22 @@ fn prior_adjust(name: &[u8], depth: u8) -> i32 {
         b"folders" | b"Containers" | b"Group Containers" => -10,
         b"Application Support" => -5,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walk::RawEnt;
+
+    /// A path 300 folders deep keeps its top folders.
+    #[test]
+    fn deep_path() {
+        let ent = |kind, child| RawEnt { name_off: 0, name_len: 1, kind, size: 0, mtime: 0, child };
+        let ls = (0..=300).map(|i| Listing { id: i, names: b"d".to_vec(), ents: vec![if i < 300 { ent(KIND_DIR, i + 1) } else { ent(0, NONE) }] });
+        let idx = Index::build(ls.collect(), 0, 0, b"/h");
+        let mut p = Vec::new();
+        idx.path(idx.n - 1, &mut p);
+        assert_eq!(p, b"/d".repeat(301));
     }
 }

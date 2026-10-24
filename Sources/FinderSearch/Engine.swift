@@ -9,6 +9,7 @@ struct Hit: Decodable, Identifiable, Hashable {
     let mtime: UInt64
     let score: Int64
     var metadataPending: Bool? = nil
+    var contentSnippet: String? = nil
     var url: URL { URL(fileURLWithPath: path, isDirectory: kind == "dir") }
     var name: String { (path as NSString).lastPathComponent }
     var imageKey: String { path + ":" + String(mtime) + ":" + String(metadataPending == true) }
@@ -24,7 +25,25 @@ struct Reply: Decodable {
     let took_us: UInt64?
     let entries: Int?
     let full_disk_access: Bool?
+    var files: [ContentFile]? = nil
+    var next: UInt64? = nil
+    var complete: Bool? = nil
+    var indexing: Int? = nil
+    var content_pending: Int? = nil
+    var document_indexing: Bool? = nil
 }
+
+struct ContentFile: Decodable {
+    let path: String
+    let size: UInt64?
+    let mtime: UInt64?
+    let matches: [ContentMatch]
+    var hit: Hit {
+        Hit(path: path, kind: "file", size: size ?? 0, mtime: mtime ?? 0, score: 0,
+            metadataPending: size == nil, contentSnippet: matches.first?.text)
+    }
+}
+struct ContentMatch: Decodable { let text: String }
 
 protocol SearchService: Sendable {
     func request(_ fields: [String: Any]) async throws -> Reply

@@ -18,6 +18,10 @@ preview files, and manage your files in a familiar macOS interface.
 
 - **Find files quickly.** Fuzzy matching, relevance ranking, folder scope, and
   filters like `ext:pdf` and `mtime:<7d`.
+- **Search document contents.** Enable **Index Common Document Contents** in
+  Settings, then choose **File Contents** in the search bar. DOC, DOCX, PDF,
+  XLS and XLSX are supported; the option is off by default. No OCR or exact
+  page/cell navigation is included.
 - **Browse your way.** Icon, list, column, and gallery views, Quick Look previews,
   and tabs that restore when you reopen the app.
 - **Get file work done.** Drag selection, copy and move, batch rename, ZIP tools,

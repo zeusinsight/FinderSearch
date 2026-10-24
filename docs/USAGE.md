@@ -114,8 +114,16 @@ not intentionally download cloud file contents.
 - **Search:** Command-F; requests begin 50 ms after typing stops; Return submits a pending search immediately. Search This Mac or
   the current folder, with kind filters. Obsolete requests are cancelled and stale
   replies ignored. Up to 500 matches are shown; column-mode search uses the list.
-- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work. The UI does not
-  yet support content-query syntax. Footer timing measures engine work, excluding
+- **Document contents:** enable **Index Common Document Contents** in Settings (off
+  by default), then choose **File Contents** beside the search scope. It searches
+  literal text in DOC, DOCX, PDF, XLS and XLSX, including worksheet cells, and
+  shows matching text in icon results or the list row's tooltip. The first index
+  build takes time. Scanned pages need OCR and are not included; opening a result
+  opens the file normally, without page/cell navigation. Files up to 64 MiB and
+  extracted text up to 8 MiB are supported; unreadable/encrypted files are skipped.
+- **Filters:** filename filters such as `ext:pdf` and `mtime:<7d` work in filename
+  mode. In content mode, the input is the literal phrase; use the folder and kind
+  controls to narrow files. Footer timing measures engine work, excluding
   debounce, IPC, and rendering.
 - **Select and preview:** click, Command-click, or Shift-click; double-click or
   Command-O opens, Space/Command-Y uses Quick Look, and Return renames.

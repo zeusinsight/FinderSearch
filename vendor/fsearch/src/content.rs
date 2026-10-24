@@ -18,6 +18,7 @@
 //! knows about with the docs we hold, reindex what changed, tombstone what
 //! went away. The first build is just a sync of $HOME.
 
+use crate::document;
 use crate::index::{HDR, as_bytes, fields, header, layout, sec};
 use crate::live::{Live, join};
 use crate::query::{GrepMode, Query, fold};
@@ -417,6 +418,10 @@ impl Segment {
         if let Ok(b) = std::fs::read(dead_path(dir, id)) {
             for (w, c) in dead.iter_mut().zip(b.chunks_exact(8)) {
                 *w = u64::from_le_bytes(c.try_into().unwrap());
+            }
+            // (Bits past the last doc: a corrupt file.)
+            if let Some(w) = dead.last_mut().filter(|_| !ndocs.is_multiple_of(64)) {
+                *w &= (1 << (ndocs % 64)) - 1;
             }
         }
         let live_docs = ndocs - dead.iter().map(|w| w.count_ones() as usize).sum::<usize>();
@@ -994,9 +999,17 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
                     ahead.push_back(open_ahead(docs.path(i + ahead.len())));
                 }
                 buf.clear();
-                let text = (ahead.pop_front().flatten())
-                    .and_then(|f| f.take(MAX_REPO_FILE + 1).read_to_end(&mut buf).ok())
-                    .is_some_and(|n| n as u64 <= MAX_REPO_FILE && is_text(&buf));
+                let opened = ahead.pop_front().flatten();
+                let text = if document::kind(docs.path(i)).is_some() {
+                    opened.and_then(|f| document::read(docs.path(i), f)).is_some_and(|b| {
+                        buf = b;
+                        !buf.is_empty() && memchr::memchr(0, &buf).is_none()
+                    })
+                } else {
+                    opened
+                        .and_then(|f| f.take(MAX_REPO_FILE + 1).read_to_end(&mut buf).ok())
+                        .is_some_and(|n| n as u64 <= MAX_REPO_FILE && is_text(&buf))
+                };
                 let holds = if !text {
                     Holds::Nothing
                 } else {
@@ -1333,6 +1346,9 @@ pub fn eligible(path: &[u8], size: u64, home: &[u8]) -> bool {
 
 /// Outside git repos, the text files are known by name and size.
 fn name_ok(name: &[u8], size: u64) -> bool {
+    if document::kind(name).is_some() {
+        return document::enabled() && size <= document::MAX_SOURCE;
+    }
     if size > MAX_FILE || SKIP_DIRS.contains(&name) {
         return false;
     }
@@ -1347,6 +1363,9 @@ fn name_ok(name: &[u8], size: u64) -> bool {
 
 /// A name fff takes for binary without reading it.
 fn binary_ext(name: &[u8]) -> bool {
+    if document::enabled() && document::kind(name).is_some() {
+        return false;
+    }
     name.iter().rposition(|&b| b == b'.').filter(|&p| p > 0).is_some_and(|p| BINARY_EXTS.iter().any(|x| x.eq_ignore_ascii_case(&name[p + 1..])))
 }
 
@@ -1619,7 +1638,7 @@ impl<'a> Scope<'a> {
             }
         };
         let Some(place) = place else { return false };
-        let cap = if json_ext(name) { MAX_FILE } else { MAX_REPO_FILE };
+        let cap = if document::kind(name).is_some() { document::MAX_SOURCE } else if json_ext(name) { MAX_FILE } else { MAX_REPO_FILE };
         let ok = if place.repo { size <= cap && name != b".git" && !binary_ext(name) } else { name_ok(name, size) };
         ok && !generated(name, size) && !ignored(&place.rules, self.global.as_deref(), path, false)
     }
@@ -1642,7 +1661,7 @@ impl<'a> Scope<'a> {
             picked.reserve_exact(range.len());
             for i in range {
                 let (name, size) = (idx.name(i), idx.size_of(i));
-                if idx.kind(i) & 3 != KIND_FILE || live.is_dead(i as u32) || size > MAX_REPO_FILE || binary_ext(&name) {
+                if idx.kind(i) & 3 != KIND_FILE || live.is_dead(i as u32) || size > document::MAX_SOURCE || binary_ext(&name) {
                     continue;
                 }
                 path(i, &mut p);
@@ -2270,7 +2289,11 @@ impl Content {
                     match want.find(&s.path(d)) {
                         // (A doc whose content is gone is indexed again.)
                         Some(k)
-                            if want.items[k].2 == s.size()[i] as u64
+                            // Documents can change text while preserving size and
+                            // second-resolution mtime. Recheck them on folder events;
+                            // extraction's metadata cache avoids reparsing unchanged files.
+                            if document::kind(want.path(k)).is_none()
+                                && want.items[k].2 == s.size()[i] as u64
                                 && want.items[k].3 == s.mtime()[i]
                                 && (g == NONE || content_of(gids, g).is_some()) =>
                         {
@@ -2811,6 +2834,7 @@ impl Content {
             let ids = if recursive { s.with_prefix(&lo).collect::<Vec<_>>() } else { s.direct_children(&lo) };
             for d in ids {
                 if let Some(k) = want.find(&s.path(d))
+                    && document::kind(want.path(k)).is_none()
                     && (want.items[k].2, want.items[k].3) == (s.size()[d as usize] as u64, s.mtime()[d as usize])
                 {
                     held[k] = true;
@@ -3235,7 +3259,7 @@ pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) -> V
         if in_scope(d, home) {
             // A folder whose ignore files changed: so may all below it.
             out.push((d.clone(), r || scope.rules_changed(d)));
-        } else if r && home.starts_with(d) {
+        } else if r && home.starts_with(d) && (d.ends_with(b"/") || home[d.len()..].starts_with(b"/")) {
             // A subtree containing home (e.g. "/" rescanned): sync all of home.
             out.push((home.to_vec(), true));
         }
@@ -3275,6 +3299,12 @@ pub fn grep_unindexed(g: &Grep, mut docs: Docs, filt: &Query) -> GrepResult {
 /// A pattern's gram hashes, as `may_contain` checks them.
 struct Probes {
     short: Vec<u32>,
+}
+
+/// Does the pattern hold a non-ASCII letter with another case (é, É)? A
+/// case-insensitive match may then hold other bytes for it.
+fn cased(pattern: &str) -> bool {
+    pattern.chars().any(|c| !c.is_ascii() && !c.to_lowercase().eq(c.to_uppercase()))
 }
 
 /// How a pattern's letter case matters.
@@ -3418,7 +3448,9 @@ impl Grep {
     }
 
     fn build(&self) -> Result<Regex, String> {
-        RegexBuilder::new(&self.src).case_insensitive(self.case_insensitive).multi_line(true).size_limit(1 << 26).build().map_err(|e| e.to_string())
+        // CRLF: `$` also matches before a \r\n line end (Windows files).
+        let b = RegexBuilder::new(&self.src).case_insensitive(self.case_insensitive).multi_line(true).crlf(true).size_limit(1 << 26).build();
+        b.map_err(|e| e.to_string())
     }
 
     fn re(&self) -> &Regex {
@@ -3428,11 +3460,14 @@ impl Grep {
 
     /// Hashes of the grams every match holds (see `SHORT`).
     fn probes(&self) -> Probes {
+        // (A non-ASCII letter's other case may be other bytes.)
+        let cased = self.case_insensitive && cased(&self.pattern);
         let grams = |n: usize| {
             let mut out: Vec<u32> = if self.mode == GrepMode::Regex {
                 Vec::new()
             } else {
-                self.pattern.as_bytes().windows(n).map(|w| gram_hash(w.iter().fold(0, |g, &b| g << 8 | fold(b) as u64))).collect()
+                let grams = self.pattern.as_bytes().windows(n).filter(|w| !cased || w.is_ascii());
+                grams.map(|w| gram_hash(w.iter().fold(0, |g, &b| g << 8 | fold(b) as u64))).collect()
             };
             out.sort_unstable();
             out.dedup();
@@ -3442,13 +3477,16 @@ impl Grep {
     }
 
     fn plan(&self) -> TQ {
-        match self.mode {
+        let q = match self.mode {
             // Exactly the docs that define it (plus rare hash collisions,
             // which reading the file weeds out).
-            GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => TQ::Tri(symbol_key(self.pattern.as_bytes())),
+            GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => return TQ::Tri(symbol_key(self.pattern.as_bytes())),
             GrepMode::Literal | GrepMode::Symbol => literal_plan(self.pattern.as_bytes()),
             GrepMode::Regex => regex_syntax::Parser::new().parse(&self.pattern).map_or(TQ::All, |h| regex_plan(&h)),
-        }
+        };
+        // The index folds ASCII only: a non-ASCII letter's other case is
+        // other bytes.
+        if self.case_insensitive && cased(&self.pattern) { ascii_only(q) } else { q }
     }
 }
 
@@ -3704,6 +3742,10 @@ fn match_file(g: &Grep, path: &[u8], opening: Option<&std::sync::atomic::AtomicU
 /// `match_file` on a file opened at `size` bytes.
 fn match_open(g: &Grep, path: &[u8], mut file: std::fs::File, size: u64, text: bool) -> Option<FileMatches> {
     use std::io::{Read, Seek};
+    if document::kind(path).is_some() {
+        let buf = document::read(path, file)?;
+        return matches_in(g, path, &buf, false);
+    }
     if size > MAX_REPO_FILE {
         return None;
     }
@@ -3975,6 +4017,17 @@ pub enum TQ {
     Pair(u32),
     And(Vec<TQ>),
     Or(Vec<TQ>),
+}
+
+/// A plan without the trigrams and pairs holding non-ASCII bytes.
+fn ascii_only(q: TQ) -> TQ {
+    match q {
+        TQ::Tri(t) if t < 1 << 24 && t.to_be_bytes()[1..].iter().any(|&b| b >= 0x80) => TQ::All,
+        TQ::Pair(p) if p.to_be_bytes()[1..3].iter().any(|&b| b >= 0x80) => TQ::All,
+        TQ::And(v) => TQ::And(v.into_iter().map(ascii_only).collect()),
+        TQ::Or(v) => TQ::Or(v.into_iter().map(ascii_only).collect()),
+        q => q,
+    }
 }
 
 fn literal_plan(s: &[u8]) -> TQ {
@@ -4641,18 +4694,21 @@ fn regex_plan(h: &Hir) -> TQ {
 pub fn scan_paths(live: &Live, mut q: Query) -> Vec<Vec<u8>> {
     q.kind = Some(KIND_FILE);
     q.limit = 200_000;
-    q.size = (q.size.0, q.size.1.min(MAX_FILE));
+    q.size = (q.size.0, q.size.1.min(if document::enabled() { document::MAX_SOURCE } else { MAX_FILE }));
     let mut files: Vec<(Vec<u8>, u32)> = (crate::query::Searcher { live }.search(&q).into_iter())
-        .map(|h| match h.over {
-            Some(path) => {
-                let m = live.over[&path].mtime;
-                (path, m)
-            }
-            None => {
-                let mut p = Vec::new();
-                live.base.path(h.idx as usize, &mut p);
-                (p, live.base.mtime(h.idx as usize))
-            }
+        .filter_map(|h| {
+            let (path, size, mtime) = match h.over {
+                Some(path) => {
+                    let o = live.over[&path];
+                    (path, o.size, o.mtime)
+                }
+                None => {
+                    let mut path = Vec::new();
+                    live.base.path(h.idx as usize, &mut path);
+                    (path, live.base.size_of(h.idx as usize), live.base.mtime(h.idx as usize))
+                }
+            };
+            (if document::kind(&path).is_some() { document::enabled() } else { size <= MAX_FILE }).then_some((path, mtime))
         })
         .collect();
     files.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
@@ -4688,7 +4744,8 @@ pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
 fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(std::ffi::OsStr::from_bytes(path)).ok()?;
+    let f =
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | crate::walk::NOFOLLOW).open(std::ffi::OsStr::from_bytes(path)).ok()?;
     let m = f.metadata().ok()?;
     m.is_file().then_some((f, m.len()))
 }
@@ -4706,4 +4763,96 @@ fn open_ahead_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     let ra = libc::radvisory { ra_offset: 0, ra_count: len.min(MAX_REPO_FILE + 1) as libc::c_int };
     unsafe { libc::fcntl(f.as_raw_fd(), libc::F_RDADVISE, &ra) };
     Some((f, len))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walk::{Listing, RawEnt};
+
+    /// The lines of `buf` a grep shows.
+    fn lines(g: &Grep, buf: &[u8]) -> Vec<(usize, String)> {
+        matches_in(g, b"/f", buf, false).map_or(Vec::new(), |f| f.lines)
+    }
+
+    /// `$` ends a line before a \r\n as before a \n.
+    #[test]
+    fn crlf_line_ends() {
+        let g = Grep::new("foo$", GrepMode::Regex).unwrap();
+        assert_eq!(lines(&g, b"foo\r\nbar\r\nfoo"), [(1, "foo".to_string()), (3, "foo".to_string())]);
+    }
+
+    /// A case-insensitive search through the index finds what the regex
+    /// folds to: ÉMILE for émile. Plans without such letters stay as they
+    /// were.
+    #[test]
+    fn case_folds_through_the_index() {
+        let d = std::env::temp_dir().join(format!("fsearch-fold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut docs = Docs::default();
+        // Real, as the index holds paths: files are opened refusing links.
+        let d = d.canonicalize().unwrap();
+        for (name, text) in [("b.txt", "dear ÉMILE\n"), ("c.txt", "a key for émile\n"), ("d.txt", "none\n")] {
+            let p = d.join(name);
+            std::fs::write(&p, text).unwrap();
+            docs.push(p.as_os_str().as_bytes(), text.len() as u64, 1);
+        }
+        docs.sort();
+        let mut c = Content::open(d.join("idx"));
+        let id = c.alloc_id();
+        c.push(build_segment(&c.dir, id, &docs, 0..docs.len()).unwrap());
+        let found = |pattern: &str, mode: GrepMode| {
+            let mut g = Grep::new(pattern, mode).unwrap();
+            g.budget = None;
+            let r = c.search(&g, &Query::parse("", "/h").unwrap());
+            let mut f: Vec<String> = r.files.iter().map(|f| String::from_utf8_lossy(&f.path[d.as_os_str().len() + 1..]).into_owned()).collect();
+            f.sort();
+            f
+        };
+        let r = [found("émile", GrepMode::Literal), found("é", GrepMode::Regex)];
+        let _ = std::fs::remove_dir_all(&d);
+        let e = vec!["b.txt".to_string(), "c.txt".into()];
+        assert_eq!(r, [e.clone(), e]);
+        let plan = |p: &str| format!("{:?}", Grep::new(p, GrepMode::Literal).unwrap().plan());
+        assert_eq!(plan("hello world"), format!("{:?}", literal_plan(b"hello world")));
+    }
+
+    /// A rescan of a folder above home syncs all of home; one of a sibling
+    /// whose name home's starts with (/Users/m for /Users/me) does not.
+    #[test]
+    fn trees_above_home() {
+        let dir = |off, len, child| RawEnt { name_off: off, name_len: len, kind: KIND_DIR, size: 0, mtime: 0, child };
+        let ls = vec![
+            Listing { id: 0, names: b"Users".to_vec(), ents: vec![dir(0, 5, 1)] },
+            Listing { id: 1, names: b"mme".to_vec(), ents: vec![dir(0, 1, 2), dir(1, 2, 3)] },
+            Listing { id: 2, ..Default::default() },
+            Listing { id: 3, ..Default::default() },
+        ];
+        let live = Live::new(crate::index::Index::build(ls, 0, 0, b"/Users/me"));
+        let synced = |tree: &[u8]| wants(&live, b"/Users/me", &[], &[tree.to_vec()]).into_iter().map(|w| (w.0, w.1)).collect::<Vec<_>>();
+        assert_eq!(synced(b"/Users/m"), []);
+        for above in [&b"/"[..], b"/Users"] {
+            assert_eq!(synced(above), [(b"/Users/me".to_vec(), true)]);
+        }
+    }
+
+    /// Bits past the last doc in a `.dead` file (it is only ever written
+    /// whole, so a corrupt one) are not counted as dead docs.
+    #[test]
+    fn dead_bits_past_the_docs() {
+        let d = std::env::temp_dir().join(format!("fsearch-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("a.txt");
+        std::fs::write(&p, "text\n").unwrap();
+        let mut docs = Docs::default();
+        docs.push(p.as_os_str().as_bytes(), 5, 1);
+        let seg = build_segment(&d, 1, &docs, 0..1).unwrap();
+        assert_eq!(seg.live_docs, 1);
+        std::fs::write(dead_path(&d, 1), u64::MAX.to_le_bytes()).unwrap();
+        let seg = Segment::load(&d, 1);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(seg.unwrap().live_docs, 0);
+    }
 }

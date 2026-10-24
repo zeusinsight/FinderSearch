@@ -42,6 +42,8 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         }
     }
     @Published var scope = "" { didSet { if !query.isEmpty { schedule() } } }
+    @Published var searchContents = false { didSet { if isSearch { schedule() } } }
+    @Published private(set) var contentIndexing = false
     @Published var fileType = "" { didSet { schedule() } }
     @Published var hits: [Hit] = [] { didSet { invalidateDerived() } }
     @Published var extraHits: [Hit] = [] {
@@ -118,6 +120,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var forwardStack: [URL] = []
     private let searchDebounce: Duration
     private var searchDebouncing = false
+    private var lastDocumentIndexing: Bool?
     private let engine: any SearchService
     private let diskAccessCheck: @Sendable () -> Bool
     private let folderLoader: @Sendable (URL, Bool) async throws -> [Hit]
@@ -395,7 +398,7 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
         metadataObservers.forEach(NotificationCenter.default.removeObserver)
         metadataObservers = []
         let folder = location, hidden = showHidden, text = query, searchScope = scope,
-            type = fileType
+            type = fileType, contents = searchContents
         let recent = route == "recents" && !isSearch
         loading = !searchingNow && !cached; searching = searchingNow
         searchDebouncing = searchingNow && !immediate
@@ -421,12 +424,34 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     } else if !type.isEmpty {
                         fields["type"] = type
                     }
-                    let reply = try await engine.request(fields)
-                    guard reply.ok else {
-                        throw Engine.Failure.message(reply.error ?? "Search failed")
+                    if searchingNow && contents {
+                        fields["op"] = "grep"; fields["mode"] = "literal"; fields["pattern"] = text; fields["q"] = ""
+                        fields["per_file"] = 1; fields["budget_ms"] = 1000
+                        var found: [Hit] = [], paths = Set<String>(), cursors = Set<UInt64>()
+                        var took: UInt64 = 0
+                        repeat {
+                            try Task.checkCancellation()
+                            let reply = try await engine.request(fields)
+                            guard reply.ok else { throw Engine.Failure.message("Search failed") }
+                            for file in reply.files ?? [] where paths.insert(file.path).inserted {
+                                found.append(file.hit)
+                            }
+                            took += reply.took_us ?? 0
+                            guard revision == generation, !Task.isCancelled else { return }
+                            contentIndexing = (reply.indexing ?? 0) > 0
+                            if found.count >= 500 || reply.complete == true { break }
+                            guard let cursor = reply.next, cursors.insert(cursor).inserted else { break }
+                            fields["cursor"] = cursor; fields["limit"] = 500 - found.count
+                        } while true
+                        result = Array(found.prefix(500)); elapsed = Double(took) / 1000
+                    } else {
+                        let reply = try await engine.request(fields)
+                        guard reply.ok else {
+                            throw Engine.Failure.message(reply.error ?? "Search failed")
+                        }
+                        result = reply.hits ?? [];
+                        if revision == generation { elapsed = Double(reply.took_us ?? 0) / 1000 }
                     }
-                    result = reply.hits ?? [];
-                    if revision == generation { elapsed = Double(reply.took_us ?? 0) / 1000 }
                 } else {
                     if !cached {
                         await Task.yield()
@@ -607,6 +632,11 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             let becameReady = status.ok && !ready; if ready != status.ok { ready = status.ok }
             if status.ok {
                 if entries != status.entries ?? 0 { entries = status.entries ?? 0 }
+                let documentSettingChanged = lastDocumentIndexing != nil && lastDocumentIndexing != status.document_indexing
+                lastDocumentIndexing = status.document_indexing
+                let wasIndexing = contentIndexing
+                contentIndexing = (status.content_pending ?? 0) > 0
+                if (documentSettingChanged || (wasIndexing && !contentIndexing)) && isSearch && searchContents && !searching { schedule() }
                 if becameReady && (isSearch || route == "recents") { schedule() }
             }
         } catch { if isSearch { self.error = error.localizedDescription } }

@@ -45,6 +45,7 @@ struct Api {
     invalidate: unsafe extern "C" fn(*mut c_void),
     release: unsafe extern "C" fn(*mut c_void),
     current_id: unsafe extern "C" fn() -> u64,
+    cf_release: unsafe extern "C" fn(*const c_void),
     string: unsafe extern "C" fn(*const c_void, *const i8, u32) -> *const c_void,
     array: unsafe extern "C" fn(*const c_void, *const *const c_void, isize, *const c_void) -> *const c_void,
     array_callbacks: *const c_void,
@@ -74,6 +75,7 @@ fn api() -> &'static Api {
             invalidate: sym(cs, c"FSEventStreamInvalidate"),
             release: sym(cs, c"FSEventStreamRelease"),
             current_id: sym(cs, c"FSEventsGetCurrentEventId"),
+            cf_release: sym(cf, c"CFRelease"),
             string: sym(cf, c"CFStringCreateWithCString"),
             array: sym(cf, c"CFArrayCreate"),
             array_callbacks: sym(cf, c"kCFTypeArrayCallBacks"),
@@ -110,6 +112,12 @@ extern "C" fn on_events(_s: *mut c_void, info: *mut c_void, n: usize, paths: *mu
     let _ = info.tx.send(batch);
 }
 
+extern "C" fn release_info(info: *const c_void) {
+    if !info.is_null() {
+        drop(unsafe { Box::from_raw(info as *mut Info) });
+    }
+}
+
 /// A running stream; dropping it stops it.
 pub struct Stream(*mut c_void);
 
@@ -135,18 +143,18 @@ pub fn watch(since: u64, latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> S
     unsafe {
         let root = (a.string)(std::ptr::null(), c"/".as_ptr(), 0x0800_0100);
         let arr = (a.array)(std::ptr::null(), &root, 1, a.array_callbacks);
-        // The sender is leaked: a callback may still be in flight when the
-        // stream stops, and streams are replaced rarely.
         let ctx = Context {
             version: 0,
             info: Box::into_raw(Box::new(Info { tx, stream })) as *mut c_void,
             retain: std::ptr::null(),
-            release: std::ptr::null(),
+            release: release_info as *const c_void,
             copy_description: std::ptr::null(),
         };
         // Not IgnoreSelf: linked into an app, the app's own renames and moves
         // are exactly what its search must see.
         let s = (a.create)(std::ptr::null(), on_events, &ctx, arr, since, latency, CREATE_FLAG_NO_DEFER);
+        (a.cf_release)(arr);
+        (a.cf_release)(root);
         // The callback only copies paths out, but it must not queue behind
         // busy threads (a first build runs on every core at user-initiated
         // QoS): fseventsd drops what a client falls behind on, and the drop

@@ -26,6 +26,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
 ./scripts/build-icon.sh "$app/Contents/Resources/AppIcon.icns"
 cp "$swift_bin/FinderSearch" "$app/Contents/MacOS/"
 cp vendor/fsearch/target/release/fsearch "$app/Contents/Helpers/"
+cp vendor/fsearch/target/release/fsearch-extract "$app/Contents/Helpers/"
+cp vendor/fsearch/DOCUMENT-LICENSE "$app/Contents/Resources/fsearch-DOCUMENT-LICENSE"
 cp vendor/fsearch/LICENSE "$app/Contents/Resources/fsearch-LICENSE"
 if [[ -f LICENSE ]]; then
     cp LICENSE "$app/Contents/Resources/FinderSearch-LICENSE"
@@ -46,6 +48,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --sign - "$app/Contents/Helpers/fsearch"
+codesign --force --sign - "$app/Contents/Helpers/fsearch-extract"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 # Launch Services notices updated bundles by their directory modification time.

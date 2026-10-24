@@ -602,7 +602,7 @@ impl Query {
                 // mtime:<7d means "modified within the last 7 days".
                 let now = now_secs();
                 let (lo, hi) = range(v, parse_age)?;
-                self.mtime = (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo as u32));
+                self.mtime = (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo.min(now as u64) as u32));
                 if hi == u64::MAX {
                     self.mtime.0 = 0;
                 }
@@ -627,7 +627,8 @@ impl Query {
     pub fn kind_ok(&self, kind: u8) -> bool {
         match self.kind {
             None => true,
-            Some(want) => kind & 3 == want || (self.apps && kind & 3 == KIND_LINK),
+            // (Links stand in for app folders only, not under a later kind:file.)
+            Some(want) => kind & 3 == want || (self.apps && want == KIND_DIR && kind & 3 == KIND_LINK),
         }
     }
 
@@ -1691,7 +1692,7 @@ impl TopK {
     fn push(&mut self, key: u64) {
         if key > self.floor {
             self.buf.push(key);
-            if self.buf.len() >= (2 * self.k).max(64) {
+            if self.buf.len() >= self.k.saturating_mul(2).max(64) {
                 self.cut();
             }
         }
@@ -3866,7 +3867,7 @@ impl NameTable {
 
     /// The `dense` view, built on first use.
     fn dense(&self, idx: &Index) -> &[Short] {
-        lazy(&self.dense, || {
+        lazy::<Vec<Short>>(&self.dense, || {
             let spare = DENSE_POOL.lock().unwrap().pop().filter(|d| d.len() == idx.words * 64);
             // A fresh one comes zeroed (all `Short::default()`) from the
             // allocator, which maps zero pages in without writing them.
@@ -4052,4 +4053,39 @@ fn rank_tweaks(flags: u8, kind: u8, mtime: u32, now: u32) -> i32 {
         _ => 0,
     };
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walk::{Listing, NONE, RawEnt};
+
+    /// An index of "/" holding files `abc` and `abd`.
+    fn live() -> Live {
+        let ent = |off| RawEnt { name_off: off, name_len: 3, kind: KIND_FILE, size: 1, mtime: 1, child: NONE };
+        Live::new(Index::build(vec![Listing { id: 0, names: b"abcabd".to_vec(), ents: vec![ent(0), ent(3)] }], 0, 0, b"/h"))
+    }
+
+    /// limit: takes any number; the largest overflowed `TopK`.
+    #[test]
+    fn huge_limit() {
+        let l = live();
+        let q = Query::parse(&format!("limit:{} ab", usize::MAX), "/h").unwrap();
+        assert_eq!(Searcher { live: &l }.search(&q).len(), 2);
+    }
+
+    /// An age past what a u32 of seconds holds (136 years) is older than
+    /// anything, not an age wrapped around to a few years.
+    #[test]
+    fn mtime_older_than_u32() {
+        let q = Query::parse("mtime:>140y", "/h").unwrap();
+        assert_eq!(q.mtime, (0, 0));
+    }
+
+    /// type:app takes symlinks as folders; kind:file after it means files.
+    #[test]
+    fn app_links_only_as_folders() {
+        assert!(Query::parse("type:app", "/h").unwrap().kind_ok(KIND_LINK));
+        assert!(!Query::parse("type:app kind:file", "/h").unwrap().kind_ok(KIND_LINK));
+    }
 }

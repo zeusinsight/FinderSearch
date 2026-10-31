@@ -32,9 +32,16 @@ struct OpenWithMenu: View {
 extension SearchModel {
     func openWith(_ application: URL, hit: Hit) {
         let urls = selection.contains(hit.path) ? selectedItems.map(\.url) : [hit.url]
+        let paths = urls.map(\.path)
         NSWorkspace.shared.open(urls, withApplicationAt: application, configuration: .init()) {
             [weak self] _, error in
-            if let error { Task { @MainActor in self?.error = error.localizedDescription } }
+            Task { @MainActor in
+                if let error {
+                    self?.error = error.localizedDescription
+                } else {
+                    self?.recordOpened(paths)
+                }
+            }
         }
     }
     func chooseApplication(for hit: Hit) {

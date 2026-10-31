@@ -10,6 +10,7 @@ they were verified.
 - `Model.swift`: per-tab navigation, selection, cached snapshots, search scheduling,
   folder observation, and file-operation history.
 - `Engine.swift`: fsearch JSON-lines client, reply types, cancellation, and timeouts.
+- `SearchStrategy.swift`: query sanitization, tiered multi-word/typo fallbacks, and token-aware relevance reranking.
 - `FileSystem.swift`: local directory enumeration, file mutations, icons, and previews.
 - `FileList.swift`: native fixed-height AppKit table and its selection/drop handling.
 - `SessionState.swift`, `BrowserTabBar.swift`, and `TabControls.swift`: session snapshots, tab UI, and native tab interactions.

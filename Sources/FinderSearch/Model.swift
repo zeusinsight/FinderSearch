@@ -28,6 +28,12 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
     @Published var query = "" {
         willSet { if !changingLocation && !isSearch { saveDefaultSnapshot() } }
         didSet {
+            if !changingLocation && isSearch
+                && oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && sort != .relevance
+            {
+                sort = .relevance
+            }
             invalidateDerived()
             if !changingLocation && !isSearch,
                 let snapshot = snapshots[SnapshotKey(route: route, hidden: showHidden)]
@@ -408,25 +414,114 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
                     }
                     try Task.checkCancellation()
                     searchDebouncing = false
-                    var fields: [String: Any] = [
-                        "q": recent ? "mtime:<30d kind:file" : text, "limit": recent ? 1000 : 500,
-                    ]
-                    if recent {
-                        fields["in"] = NSHomeDirectory()
-                    } else if !searchScope.isEmpty {
-                        fields["in"] = searchScope
+                    let plan = SearchQueryPlan(text)
+                    let currentRoute = route
+                    let hasFDA = fullDiskAccess
+                    let seedHits =
+                        snapshots[SnapshotKey(route: currentRoute, hidden: hidden)]?.hits ?? []
+                    func makeFields(queryText: String, limit: Int) -> [String: Any] {
+                        var fields: [String: Any] = [
+                            "q": queryText, "limit": limit,
+                        ]
+                        if recent {
+                            fields["in"] = NSHomeDirectory()
+                        } else {
+                            fields["boost"] = true
+                            if !searchScope.isEmpty {
+                                fields["in"] = searchScope
+                            }
+                            if currentRoute != "recents" && !currentRoute.hasPrefix("tag:") {
+                                fields["near"] = folder.path
+                            }
+                        }
+                        if type == "dir" {
+                            fields["kind"] = "dir"
+                        } else if !type.isEmpty {
+                            fields["type"] = type
+                        }
+                        return fields
                     }
-                    if type == "dir" {
-                        fields["kind"] = "dir"
-                    } else if !type.isEmpty {
-                        fields["type"] = type
-                    }
-                    let reply = try await engine.request(fields)
+                    let primaryFields = makeFields(
+                        queryText: recent ? "mtime:<30d kind:file" : plan.primaryQuery,
+                        limit: recent ? 1000 : 500
+                    )
+                    let reply = try await engine.request(primaryFields)
                     guard reply.ok else {
                         throw Engine.Failure.message(reply.error ?? "Search failed")
                     }
-                    result = reply.hits ?? [];
-                    if revision == generation { elapsed = Double(reply.took_us ?? 0) / 1000 }
+                    var rawHits = reply.hits ?? []
+                    var totalUs = reply.took_us ?? 0
+                    if searchingNow && rawHits.isEmpty {
+                        for tier in plan.fallbackTiers() {
+                            var mergedByPath: [String: Hit] = [:]
+                            var mergedOrder: [String] = []
+                            for fallbackQuery in tier {
+                                try Task.checkCancellation()
+                                let fallbackReply = try await engine.request(
+                                    makeFields(queryText: fallbackQuery, limit: 200))
+                                totalUs += fallbackReply.took_us ?? 0
+                                guard fallbackReply.ok, let fallbackHits = fallbackReply.hits else {
+                                    continue
+                                }
+                                for hit in fallbackHits {
+                                    if let existing = mergedByPath[hit.path] {
+                                        if hit.score > existing.score {
+                                            mergedByPath[hit.path] = hit
+                                        }
+                                    } else {
+                                        mergedByPath[hit.path] = hit
+                                        mergedOrder.append(hit.path)
+                                    }
+                                }
+                            }
+                            if !mergedOrder.isEmpty {
+                                rawHits = mergedOrder.compactMap { mergedByPath[$0] }
+                                break
+                            }
+                        }
+                    }
+                    if searchingNow && currentRoute != "recents" && !currentRoute.hasPrefix("tag:")
+                    {
+                        let localRoot =
+                            searchScope.isEmpty
+                            ? folder : URL(fileURLWithPath: searchScope, isDirectory: true)
+                        let rootPath = localRoot.standardizedFileURL.path
+                        let isGatedFolder = LocalFolderSearch.isSkippedWithoutFullDiskAccess(
+                            rootPath)
+                        if rawHits.isEmpty || (!hasFDA && isGatedFolder) || isGatedFolder {
+                            let allowRecursive =
+                                isGatedFolder
+                                || (rootPath != NSHomeDirectory() && rootPath != "/")
+                            let localHits =
+                                (try? await BackgroundWork.run {
+                                    try LocalFolderSearch.search(
+                                        root: localRoot,
+                                        seedHits: seedHits,
+                                        plan: plan,
+                                        hidden: hidden,
+                                        fileType: type,
+                                        recursive: allowRecursive
+                                    )
+                                }) ?? []
+                            if !localHits.isEmpty {
+                                var seenPaths = Set(rawHits.map(\.path))
+                                for hit in localHits where seenPaths.insert(hit.path).inserted {
+                                    rawHits.append(hit)
+                                }
+                            }
+                        }
+                    }
+                    if searchingNow && rawHits.count > 1 {
+                        let snapshotHits = rawHits
+                        let ranked = try await BackgroundWork.run {
+                            try Task.checkCancellation()
+                            return SearchRelevance.rank(hits: snapshotHits, for: plan)
+                        }
+                        result = Array(ranked.prefix(500))
+                    } else {
+                        result = rawHits
+                    }
+                    if revision == generation { elapsed = Double(totalUs) / 1000 }
                 } else {
                     if !cached {
                         await Task.yield()
@@ -611,21 +706,36 @@ struct FileJournal { let name: String; let operations: [FileMutation] }
             }
         } catch { if isSearch { self.error = error.localizedDescription } }
     }
+    func recordOpened(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        let service = engine
+        Task.detached(priority: .utility) {
+            _ = try? await service.request(["op": "open", "paths": paths])
+        }
+    }
     func open(_ item: Hit? = nil) {
         guard !busy else { return }
         if let item {
             guard item.kind != "pending" else { return }
             if item.isFolder {
                 navigate(item.url)
-            } else if !NSWorkspace.shared.open(item.url) {
+            } else if NSWorkspace.shared.open(item.url) {
+                recordOpened([item.path])
+            } else {
                 error = "Could not open ‘\(item.name)’."
             }; return
         }
+        var openedPaths: [String] = []
         for hit in selectedItems {
             guard hit.kind != "pending" else { continue }
             if hit.isFolder && selection.count == 1 { navigate(hit.url); return };
-            if !NSWorkspace.shared.open(hit.url) { error = "Could not open ‘\(hit.name)’." }
+            if NSWorkspace.shared.open(hit.url) {
+                openedPaths.append(hit.path)
+            } else {
+                error = "Could not open ‘\(hit.name)’."
+            }
         }
+        recordOpened(openedPaths)
     }
     func perform(
         _ operations: [FileMutation], name: String, history: Int = 0,
